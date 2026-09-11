@@ -1,6 +1,8 @@
 """Admin commands: season lifecycle, role setup, participant management."""
 from __future__ import annotations
 
+import asyncio
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -34,11 +36,12 @@ class Admin(commands.Cog):
     @admin_only()
     async def setup(self, interaction: app_commands.Interaction,
                     seed_channel: discord.TextChannel | None = None):
+        await interaction.response.defer(ephemeral=True)
         try:
             message = await self.service.setup(interaction.guild, seed_channel)
         except LeagueError as exc:
             message = f"❌ {exc}"
-        await interaction.response.send_message(message)
+        await interaction.followup.send(message)
 
     @app_commands.command(name="create_season", description="Start a new league season")
     @app_commands.describe(
@@ -49,10 +52,15 @@ class Admin(commands.Cog):
     @admin_only()
     async def create_season(self, interaction: app_commands.Interaction,
                             period_length: str, periods: int, start: str = "now"):
+        # Google Sheets calls can take several seconds; defer so we stay
+        # within Discord's 3-second response window.
+        await interaction.response.defer(ephemeral=True)
         try:
-            state = self.service.create_season(period_length, periods, start)
+            state = await asyncio.to_thread(
+                self.service.create_season, period_length, periods, start
+            )
         except LeagueError as exc:
-            await interaction.response.send_message(f"❌ {exc}")
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
         spec = state.season
         embed = discord.Embed(
@@ -66,7 +74,7 @@ class Admin(commands.Cog):
             ),
             colour=discord.Colour.green(),
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="season_info", description="Show the current season and active period")
     @admin_only()
@@ -77,7 +85,8 @@ class Admin(commands.Cog):
     @app_commands.describe(user="The user to register")
     @admin_only()
     async def add_participant(self, interaction: app_commands.Interaction, user: discord.User):
-        message = self.service.add_participant(user)
+        await interaction.response.defer(ephemeral=True)
+        message = await asyncio.to_thread(self.service.add_participant, user)
         member = interaction.guild.get_member(user.id)
         if member:
             await self.bot.roles.grant_participant(interaction.guild, member)
@@ -85,7 +94,7 @@ class Admin(commands.Cog):
             if state and state.in_season and state.period_index is not None:
                 if not self.bot.db.has_submitted(state.season.season_id, state.period_index, user.id):
                     await self.bot.roles.grant_seed_not_done(interaction.guild, member)
-        await interaction.response.send_message(message)
+        await interaction.followup.send(message)
 
     @app_commands.command(name="remove_participant", description="Remove a user from the league")
     @app_commands.describe(user="The user to remove")

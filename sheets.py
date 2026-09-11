@@ -167,7 +167,7 @@ class SheetService:
         try:
             ws = sheet.worksheet(title)
         except WorksheetNotFound:
-            ws = sheet.add_worksheet(title=title)
+            ws = sheet.add_worksheet(title=title, rows=1000, cols=NUM_COLUMNS)
             log.info("Created season tab %r", title)
         # Ensure the header row exists.
         existing_header = ws.row_values(1)
@@ -249,6 +249,7 @@ class SheetService:
     # -- cell writes ------------------------------------------------------
     def write_seed(self, season: SeasonSpec, period_index: int, seed: str) -> None:
         """Write the shared seed into the seed column of every row of the period."""
+        self.ensure_season_rows(season)
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:
             self._dry_log("write_seed", season_id=season.season_id, period=period_index, seed=seed)
@@ -267,6 +268,7 @@ class SheetService:
         self, season: SeasonSpec, period_index: int, discord_id: int, at: datetime
     ) -> None:
         """Write the FIRST seed-request timestamp for one participant."""
+        self.ensure_season_rows(season)
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:
             self._dry_log("write_seed_requested", season_id=season.season_id,
@@ -288,6 +290,7 @@ class SheetService:
         run_time: str,
         video_url: str,
     ) -> None:
+        self.ensure_season_rows(season)
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:
             self._dry_log("write_submission", season_id=season.season_id,

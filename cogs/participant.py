@@ -1,6 +1,8 @@
 """Participant commands: registration, seed requests, submissions."""
 from __future__ import annotations
 
+import asyncio
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -16,11 +18,14 @@ class Participant(commands.Cog):
 
     @app_commands.command(name="register", description="Register as a league participant")
     async def register(self, interaction: app_commands.Interaction):
+        # Deferring keeps us within Discord's 3-second window when sheet
+        # pre-creation happens in the same call.
+        await interaction.response.defer(ephemeral=True)
         try:
-            message = self.service.register(interaction.user)
+            message = await asyncio.to_thread(self.service.register, interaction.user)
         except LeagueError as exc:
             message = f"❌ {exc}"
-        await interaction.response.send_message(message)
+        await interaction.followup.send(message)
 
         await self.bot.roles.grant_participant(interaction.guild, interaction.user)
         state = current_season_state(self.bot.db)
@@ -30,12 +35,13 @@ class Participant(commands.Cog):
 
     @app_commands.command(name="seed", description="Request the RNG seed for the current period")
     async def seed(self, interaction: app_commands.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
-            result = self.service.request_seed(interaction.user)
+            result = await asyncio.to_thread(self.service.request_seed, interaction.user)
         except LeagueError as exc:
-            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🎲 **Seed for the current period:** `{result.seed}`\n"
             "Keep it to yourself until you have submitted your time.",
             ephemeral=True,
@@ -51,10 +57,11 @@ class Participant(commands.Cog):
         video="Link to the video of your run (http/https)",
     )
     async def submit(self, interaction: app_commands.Interaction, time: str, video: str):
+        await interaction.response.defer(ephemeral=True)
         try:
-            result = self.service.submit(interaction.user, time, video)
+            result = await asyncio.to_thread(self.service.submit, interaction.user, time, video)
         except LeagueError as exc:
-            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
         embed = discord.Embed(
             title="Submission recorded ✅",
@@ -65,5 +72,5 @@ class Participant(commands.Cog):
             ),
             colour=discord.Colour.green(),
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         await self.bot.roles.revoke_seed_not_done(interaction.guild, interaction.user)
