@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+credentials/
+league.db
+league.db-wal
+league.db-shm
+dry_run_rows.json
+.pytest_cache/
+.venv/
+venv/
