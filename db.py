@@ -130,6 +130,24 @@ class Database:
     def remove_participant(self, discord_id: int) -> None:
         self.execute("DELETE FROM participants WHERE discord_id = ?", (discord_id,))
 
+    def is_any_participant(self) -> bool:
+        rows = self.query("SELECT 1 FROM participants LIMIT 1")
+        return bool(rows)
+
+    def clear_participants(self) -> int:
+        """Delete all registrations (used when a season ends). Returns count removed."""
+        rows = self.query("SELECT COUNT(*) AS c FROM participants")
+        count = int(rows[0]["c"])
+        self.execute("DELETE FROM participants")
+        return count
+
+    def delete_records_for(self, season_id: int, discord_id: int) -> None:
+        """Remove one participant's period records for a season (unregister)."""
+        self.execute(
+            "DELETE FROM period_records WHERE season_id = ? AND discord_id = ?",
+            (season_id, discord_id),
+        )
+
     def is_participant(self, discord_id: int) -> bool:
         rows = self.query("SELECT 1 FROM participants WHERE discord_id = ?", (discord_id,))
         return bool(rows)
@@ -205,7 +223,11 @@ class Database:
         run_time: str,
         video_url: str,
     ) -> bool:
-        """Store the submission. Returns False if already submitted."""
+        """Store the submission. Returns False if already submitted.
+
+        Creates the record first if it does not exist yet (defensive).
+        """
+        self.create_record(season_id, period_index, discord_id)
         cur = self.execute(
             "UPDATE period_records SET submitted_at_utc = ?, run_time = ?, video_url = ? "
             "WHERE season_id = ? AND period_index = ? AND discord_id = ? "

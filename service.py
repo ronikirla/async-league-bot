@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import discord
 
@@ -27,7 +27,7 @@ from periods import (
 )
 from roles import RoleManager
 from sheets import SheetsError, SheetService
-from util import iso_utc, is_http_url, now_utc
+from util import discord_timestamp, format_duration, iso_utc, is_http_url, now_utc
 
 log = logging.getLogger("league")
 
@@ -61,7 +61,7 @@ class LeagueService:
     def require_state(self, now: datetime | None = None) -> SeasonState:
         state = current_season_state(self.db, now or now_utc())
         if state is None:
-            raise LeagueError("No season has been created yet. An admin needs to run `/create-season` first.")
+            raise LeagueError("No season has been created yet. An admin needs to run `/league create_season` first.")
         return state
 
     def require_active(self, now: datetime | None = None) -> tuple[SeasonState, int]:
@@ -75,7 +75,7 @@ class LeagueService:
     def require_participant(self, member: discord.Member) -> None:
         if not self.db.is_participant(member.id):
             raise LeagueError(
-                "You are not a registered participant. Use `/register` to join the league."
+                "You are not a registered participant. Use `/league register` to join the league."
             )
 
     def _spec(self, state: SeasonState) -> SeasonSpec:
@@ -102,7 +102,7 @@ class LeagueService:
             )
         else:
             lines.append(
-                "Seed channel not set. Run `/setup` with `seed_channel` to hide the seed "
+                "Seed channel not set. Run `/league setup` with `seed_channel` to hide the seed "
                 "discussion from unsubmitted participants."
             )
         return "\n".join(lines)
@@ -115,9 +115,9 @@ class LeagueService:
         except PeriodError as exc:
             raise LeagueError(str(exc)) from exc
         if num_periods < 1:
-            raise LeagueError("Number of periods must be at least 1.")
+            raise LeagueError("Number of rounds must be at least 1.")
         if num_periods > 365:
-            raise LeagueError("Number of periods must be at most 365.")
+            raise LeagueError("Number of rounds must be at most 365.")
         try:
             start_at = parse_start_time(start_text, now_utc())
         except PeriodError as exc:
@@ -139,6 +139,23 @@ class LeagueService:
             raise LeagueError(f"Season created, but the Google sheet could not be updated: {exc}") from exc
         return state
 
+    def cleanup_ended_season(self) -> str | None:
+        """Remove all registrations once a season has ended.
+
+        Returns a human-readable note if a cleanup happened, else ``None``.
+        """
+        row = self.db.get_latest_season()
+        if row is None:
+            return None
+        ended_at = datetime.fromisoformat(row["start_at_utc"]) + timedelta(
+            seconds=int(row["period_length_seconds"]) * int(row["num_periods"])
+        )
+        if ended_at <= now_utc() and self.db.is_any_participant():
+            count = self.db.clear_participants()
+            log.info("Season %s ended: cleared %d registrations", row["id"], count)
+            return f"Season {row['id']} has ended — cleared {count} registration(s)."
+        return None
+
     def season_info(self) -> str:
         state = current_season_state(self.db)
         if state is None:
@@ -147,21 +164,21 @@ class LeagueService:
         now = now_utc()
         lines = [
             f"**Season {spec.season_id}**",
-            f"Period length: `{spec.period_length}`",
-            f"Periods: {spec.num_periods}",
-            f"Season start (UTC): `{iso_utc(spec.start_at)}`",
-            f"Season end (UTC): `{iso_utc(spec.end_at)}`",
+            f"Round length: `{spec.period_length}`",
+            f"Rounds: {spec.num_periods}",
+            f"Season start: {discord_timestamp(spec.start_at)}",
+            f"Season end: {discord_timestamp(spec.end_at)}",
             f"Registered participants: {len(self.db.list_participants())}",
         ]
         if state.in_season and state.period_index is not None:
             lines.append(
-                f"Active period: **{state.period_index}/{spec.num_periods}** "
-                f"({iso_utc(state.period_start)} → {iso_utc(state.period_end)})"
+                f"Active round: **{state.period_index}/{spec.num_periods}** "
+                f"({discord_timestamp(state.period_start)} → {discord_timestamp(state.period_end)})"
             )
             seed = self.db.get_period_seed(spec.season_id, state.period_index)
-            lines.append(f"Current period seed: `{seed or 'not set (no one has requested it yet)'}`")
+            lines.append(f"Current round seed: `{seed or 'not set (no one has requested it yet)'}`")
         elif now < spec.start_at:
-            lines.append(f"Season starts in {spec.start_at - now}.")
+            lines.append(f"Season starts in {format_duration(spec.start_at - now)}.")
         else:
             lines.append("Season has ended.")
         return "\n".join(lines)
@@ -184,11 +201,25 @@ class LeagueService:
     def remove_participant(self, user: discord.User) -> str:
         if not self.db.is_participant(int(user.id)):
             return f"<@{user.id}> is not a registered participant."
+        state = current_season_state(self.db)
+        if state is not None:
+            self.db.delete_records_for(state.season.season_id, int(user.id))
         self.db.remove_participant(int(user.id))
         return f"Removed <@{user.id}> from the league."
 
+    # -- registration rules ----------------------------------------------------
+    def registration_open(self) -> None:
+        """Registration and unregistration are only allowed while no round is active."""
+        state = current_season_state(self.db)
+        if state is not None and state.in_season:
+            raise LeagueError(
+                "Registration is closed while the season is in progress. "
+                "It re-opens once the season ends."
+            )
+
     # -- participant actions -------------------------------------------------
     def register(self, member: discord.Member) -> str:
+        self.registration_open()
         if self.db.is_participant(member.id):
             return f"Welcome back, {member.mention}! You are already registered."
         name = member.global_name or member.name
@@ -200,7 +231,17 @@ class LeagueService:
                 self.sheets.ensure_season_rows(state.season)
             except SheetsError as exc:
                 return f"Registered, but the sheet update failed: {exc}"
-        return f"Registered {member.mention} as a league participant. You can now use `/seed` and `/submit`."
+        return f"Registered {member.mention} as a league participant. You can now use `/league seed` and `/league submit`."
+
+    def unregister(self, member: discord.Member) -> str:
+        self.registration_open()
+        if not self.db.is_participant(member.id):
+            return f"You are not registered, so there is nothing to do."
+        state = current_season_state(self.db)
+        if state is not None:
+            self.db.delete_records_for(state.season.season_id, member.id)
+        self.db.remove_participant(member.id)
+        return f"You have been unregistered. You can use `/league register` again once the next season opens."
 
     def request_seed(self, member: discord.Member) -> SeedResult:
         self.require_participant(member)
@@ -228,10 +269,17 @@ class LeagueService:
             self.db.set_record_seed(spec.season_id, period_index, seed)
 
         first_request = self.db.mark_seed_requested(spec.season_id, period_index, member.id)
-        if first_request:
-            at = now_utc()
+
+        # Keep the sheet in sync with the DB-stored first-request timestamp.
+        # The sheet cell is only ever filled when empty, so this is idempotent
+        # and self-heals if a previous write was lost.
+        record = self.db.record_exists(spec.season_id, period_index, member.id)
+        stored_at = record["seed_requested_at_utc"] if record else None
+        if stored_at:
             try:
-                self.sheets.write_seed_requested(spec, period_index, member.id, at)
+                self.sheets.write_seed_requested(
+                    spec, period_index, member.id, datetime.fromisoformat(stored_at)
+                )
             except SheetsError as exc:
                 raise LeagueError(
                     f"Seed requested, but logging to the sheet failed: {exc}"
@@ -252,7 +300,9 @@ class LeagueService:
             raise LeagueError("Video must be an http(s) link, e.g. a YouTube URL.")
 
         if self.db.has_submitted(spec.season_id, period_index, member.id):
-            raise LeagueError("You already submitted a time for this period. Submissions are final.")
+            # Self-heal: a previous sheet write may have been lost.
+            self._sync_submission_to_sheet(spec, period_index, member.id, quiet=True)
+            raise LeagueError("You already submitted a time for this round. Submissions are final.")
 
         self.db.create_record(spec.season_id, period_index, member.id)
         at = now_utc()
@@ -260,13 +310,28 @@ class LeagueService:
             spec.season_id, period_index, member.id, format_run_time(seconds), video_text.strip()
         )
         if not stored:
-            raise LeagueError("You already submitted a time for this period.")
+            raise LeagueError("You already submitted a time for this round.")
 
+        self._sync_submission_to_sheet(spec, period_index, member.id)
+        return SubmitResult(run_time=format_run_time(seconds), submitted_at=at)
+
+    def _sync_submission_to_sheet(
+        self, season: SeasonSpec, period_index: int, discord_id: int, quiet: bool = False
+    ) -> None:
+        """Write the DB-stored submission to the sheet (idempotent self-heal)."""
+        record = self.db.record_exists(season.season_id, period_index, discord_id)
+        if record is None or record["submitted_at_utc"] is None:
+            return
         try:
-            self.sheets.write_submission(spec, period_index, member.id, at,
-                                         format_run_time(seconds), video_text.strip())
+            self.sheets.write_submission(
+                season, period_index, discord_id,
+                datetime.fromisoformat(record["submitted_at_utc"]),
+                record["run_time"], record["video_url"],
+            )
         except SheetsError as exc:
+            if quiet:
+                log.warning("Could not re-sync submission for %s to sheet: %s", discord_id, exc)
+                return
             raise LeagueError(
                 f"Your time was recorded locally, but the sheet update failed: {exc}"
             ) from exc
-        return SubmitResult(run_time=format_run_time(seconds), submitted_at=at)

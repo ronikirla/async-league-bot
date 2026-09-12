@@ -60,9 +60,9 @@ COL_VIDEO = 10
 NUM_COLUMNS = 10
 
 HEADER = [
-    "Period",
-    "Period Start (UTC)",
-    "Period End (UTC)",
+    "Round",
+    "Round Start (UTC)",
+    "Round End (UTC)",
     "Participant",
     "Discord ID",
     "Seed",
@@ -194,7 +194,12 @@ class SheetService:
         return mapping
 
     def ensure_season_rows(self, season: SeasonSpec) -> None:
-        """Pre-create the static columns for all (participant x period) rows."""
+        """Ensure the (participant x period) rows exist, without clobbering data.
+
+        Rows are merged: only empty cells get their default values, so a
+        re-run (or a stale read from Google) never overwrites already-written
+        dynamic cells such as the seed or a submission.
+        """
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:  # dry run
             count = len(self._db.list_participants()) * season.num_periods
@@ -207,29 +212,42 @@ class SheetService:
                         season.season_id)
             return
 
-        col_a = ws.col_values(1)  # 0-indexed; index i is sheet row i+1
+        all_values = ws.get_all_values()  # 0-indexed list of row lists
         updates = []
         for (period_index, discord_id), row in mapping.items():
-            if row <= len(col_a) and col_a[row - 1] != "":
-                continue  # row already exists
+            idx = row - 1
+            existing = all_values[idx][:NUM_COLUMNS] if idx < len(all_values) else []
             start = season.period_start(period_index)
             end = season.period_end(period_index)
             participant = self._db.get_participant(discord_id)
             name = participant["display_name"] if participant else "?"
+            defaults = [
+                period_index,
+                iso_utc(start),
+                iso_utc(end),
+                name,
+                discord_id,
+                "",  # seed
+                "",  # seed requested at
+                "",  # submitted at
+                "",  # run time
+                "",  # video
+            ]
+            if all(str(c).strip() == "" for c in existing):
+                values = defaults  # brand-new row
+            else:
+                # Merge: keep existing values, fill only empty cells.
+                values = list(existing)
+                changed = False
+                for i in range(NUM_COLUMNS):
+                    if str(values[i]).strip() == "" and str(defaults[i]).strip() != "":
+                        values[i] = defaults[i]
+                        changed = True
+                if not changed:
+                    continue  # row is complete
             updates.append({
                 "range": f"A{row}:{_col_letter(NUM_COLUMNS)}{row}",
-                "values": [[
-                    period_index,
-                    iso_utc(start),
-                    iso_utc(end),
-                    name,
-                    discord_id,
-                    "",  # seed
-                    "",  # seed requested at
-                    "",  # submitted at
-                    "",  # run time
-                    "",  # video
-                ]],
+                "values": [values],
             })
         if updates:
             ws.batch_update(updates)
@@ -276,7 +294,7 @@ class SheetService:
             return
         row = self._target_row(season, period_index, discord_id)
         cell_ref = f"{_col_letter(COL_SEED_REQUESTED_AT)}{row}"
-        existing = ws[cell_ref].value
+        existing = ws.acell(cell_ref).value
         if existing:
             return  # first-request timestamp already recorded
         ws.update_acell(cell_ref, iso_utc(at))
@@ -290,6 +308,7 @@ class SheetService:
         run_time: str,
         video_url: str,
     ) -> None:
+        """Write the submission cells, only filling cells that are still empty."""
         self.ensure_season_rows(season)
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:
@@ -298,10 +317,18 @@ class SheetService:
                           run_time=run_time, video=video_url)
             return
         row = self._target_row(season, period_index, discord_id)
-        ws.batch_update([
-            {"range": f"{_col_letter(COL_SUBMITTED_AT)}{row}", "values": [[iso_utc(at)]]},
-            {"range": f"{_col_letter(COL_RUN_TIME)}{row}", "values": [[run_time]]},
-            {"range": f"{_col_letter(COL_VIDEO)}{row}", "values": [[video_url]]},
-        ])
+        cells = (
+            (COL_SUBMITTED_AT, iso_utc(at)),
+            (COL_RUN_TIME, run_time),
+            (COL_VIDEO, video_url),
+        )
+        updates = []
+        for col, value in cells:
+            ref = f"{_col_letter(col)}{row}"
+            if ws.acell(ref).value:
+                continue  # never overwrite an existing submission
+            updates.append({"range": ref, "values": [[value]]})
+        if updates:
+            ws.batch_update(updates)
         log.info("Wrote submission for discord id %d (season %s, period %d)",
                  discord_id, season.season_id, period_index)

@@ -48,21 +48,31 @@ def test_full_period_flow(service, tmp_path):
     with pytest.raises(LeagueError):
         svc.request_seed(FakeMember(2))
 
-    # Create a season starting in the past (1 day ago), 1-week periods, 3 periods.
+    # Create a season that starts in the future (registration is open).
     now = datetime.now(timezone.utc)
-    start = (now - timedelta(days=1)).isoformat()
-    state = svc.create_season("7d", 3, start)
-    assert state.in_season
-    assert state.period_index == 1
+    upcoming_start = (now + timedelta(hours=1)).isoformat()
+    svc.create_season("7d", 3, upcoming_start)
 
-    # Non-participant cannot request the seed.
-    with pytest.raises(LeagueError):
-        svc.request_seed(FakeMember(2))
-
-    # Register two participants.
+    # Registration is open before the season starts.
     assert "Registered" in svc.register(FakeMember(2, "alpha"))
     assert "already" in svc.register(FakeMember(2, "alpha"))
     svc.register(FakeMember(3, "beta"))
+
+    # Create a second season starting 1 day in the past (active period 1).
+    past_start = (now - timedelta(days=1)).isoformat()
+    state = svc.create_season("7d", 3, past_start)
+    assert state.in_season
+    assert state.period_index == 1
+
+    # Registration closes once a period is active.
+    with pytest.raises(LeagueError) as exc:
+        svc.register(FakeMember(4, "late"))
+    assert "closed" in str(exc.value).lower()
+    assert not db.is_participant(4)
+
+    # Non-participant cannot request the seed.
+    with pytest.raises(LeagueError):
+        svc.request_seed(FakeMember(4))
 
     # First seed request generates + records the seed; second call is idempotent.
     r1 = svc.request_seed(FakeMember(2))
@@ -99,7 +109,7 @@ def test_full_period_flow(service, tmp_path):
 
     # Season info mentions the active period and seed.
     info = svc.season_info()
-    assert "Active period: **1/3**" in info
+    assert "Active round: **1/3**" in info
     assert r1.seed in info
 
     # Dry-run log captured the sheet writes.
@@ -131,3 +141,44 @@ def test_add_and_remove_participant(service):
     assert "Removed" in svc.remove_participant(FakeMember(7, "gamma"))
     assert not db.is_participant(7)
     assert "not a registered participant" in svc.remove_participant(FakeMember(7))
+
+
+def test_unregister(service):
+    svc, db = service
+    svc.register(FakeMember(5))
+    assert db.is_participant(5)
+    assert "unregistered" in svc.unregister(FakeMember(5)).lower()
+    assert not db.is_participant(5)
+    # Unregistering again is a no-op.
+    assert "not registered" in svc.unregister(FakeMember(5)).lower()
+
+
+def test_season_end_clears_registrations(service):
+    svc, db = service
+    now = datetime.now(timezone.utc)
+    # A season that already ended.
+    past_start = (now - timedelta(days=30)).isoformat()
+    svc.create_season("7d", 2, past_start)
+    svc.register(FakeMember(9))
+    assert db.is_any_participant()
+    note = svc.cleanup_ended_season()
+    assert note is not None and "cleared" in note.lower()
+    assert not db.is_any_participant()
+    # Idempotent: nothing left to clean.
+    assert svc.cleanup_ended_season() is None
+
+
+def test_registration_closed_during_active_period(service):
+    svc, db = service
+    now = datetime.now(timezone.utc)
+    # Register before the season starts.
+    upcoming = (now + timedelta(hours=1)).isoformat()
+    svc.create_season("7d", 1, upcoming)
+    svc.register(FakeMember(10))
+    # Now an active season exists.
+    past_start = (now - timedelta(days=1)).isoformat()
+    svc.create_season("7d", 1, past_start)
+    with pytest.raises(LeagueError):
+        svc.unregister(FakeMember(10))
+    # ...and admin add is unaffected (no registration gate).
+    assert db.is_participant(10)

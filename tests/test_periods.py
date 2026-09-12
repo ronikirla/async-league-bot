@@ -80,6 +80,10 @@ class TestRunTime:
     def test_minutes_seconds(self):
         assert parse_run_time("12:34") == 754.0
 
+    def test_sub_minute(self):
+        assert parse_run_time("0:01") == 1.0
+        assert parse_run_time("0:45.5") == pytest.approx(45.5)
+
     def test_milliseconds(self):
         assert parse_run_time("12:34.567") == pytest.approx(754.567)
 

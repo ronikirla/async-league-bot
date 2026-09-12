@@ -15,8 +15,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from cogs.admin import Admin
-from cogs.participant import Participant
+from cogs.league import League
 from config import ConfigError, load_config
 from db import Database
 from periods import current_season_state
@@ -39,9 +38,13 @@ class LeagueBot(commands.Bot):
         self.sheets = sheets
         self.service = service
 
+    async def on_message(self, message: discord.Message) -> None:
+        # This bot is slash-command-only; the message-command pipeline is
+        # disabled (with command_prefix=None it would raise on every message).
+        return
+
     async def setup_hook(self) -> None:
-        await self.add_cog(Admin(self))
-        await self.add_cog(Participant(self))
+        await self.add_cog(League(self))
         # Guild-scoped commands appear instantly (no global sync delay).
         guild = discord.Object(id=self.config.guild_id)
         self.tree.copy_global_to(guild=guild)
@@ -53,12 +56,18 @@ class LeagueBot(commands.Bot):
 
 
 async def reconcile_loop(bot: LeagueBot) -> None:
-    """Periodically re-sync the 'seed not done' role with the database."""
+    """Periodically re-sync the 'seed not done' role with the database.
+
+    Also clears all registrations (and their roles) once a season ends.
+    """
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
             guild = bot.get_guild(bot.config.guild_id)
             if guild:
+                # A season may have ended: wipe registrations and strip roles.
+                if bot.service.cleanup_ended_season() is not None:
+                    await bot.roles.strip_league_roles(guild)
                 state = current_season_state(bot.db)
                 await bot.roles.reconcile(guild, state)
         except Exception:

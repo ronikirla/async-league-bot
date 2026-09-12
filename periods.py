@@ -157,9 +157,10 @@ def parse_run_time(text: str) -> float:
     frac = m.group(4)
     if minutes > 59 or seconds > 59:
         raise PeriodError("Invalid run time: minutes and seconds must be under 60")
-    if hours == 0 and minutes == 0:
+    total = hours * 3600 + minutes * 60 + seconds
+    if total == 0:
         raise PeriodError("Invalid run time: time must be greater than zero")
-    return hours * 3600 + minutes * 60 + seconds + (int(frac.ljust(3, "0")) / 1000.0 if frac else 0.0)
+    return total + (int(frac.ljust(3, "0")) / 1000.0 if frac else 0.0)
 
 
 def format_run_time(seconds: float) -> str:

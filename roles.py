@@ -1,10 +1,10 @@
 """Role management for the league.
 
 Two roles:
-- **participant role** (e.g. ``League Participant``): gates ``/seed`` and
-  ``/submit``. Granted on registration, removed on ``/remove-participant``.
+- **participant role** (e.g. ``League Participant``): gates ``/league seed`` and
+  ``/league submit``. Granted on registration, removed on ``/league remove_participant``.
 - **seed-not-done role** (e.g. ``League Seed Not Done``): granted while a
-  registered participant has NOT submitted the active period. This role is
+  registered participant has NOT submitted the active round. This role is
   the only permission deny on the seed discussion channel, so unsubmitted
   participants cannot see it (spoiler protection), while submitters and
   non-participants can.
@@ -85,12 +85,33 @@ class RoleManager:
     async def grant_seed_not_done(self, guild: Guild, member: Member) -> None:
         role = await self.seed_not_done_role(guild)
         if role not in member.roles:
-            await member.add_roles(role, reason="Seed not yet submitted this period")
+            await member.add_roles(role, reason="Seed not yet submitted this round")
 
     async def revoke_seed_not_done(self, guild: Guild, member: Member) -> None:
         role = self._find_role(guild, self._config.seed_not_done_role_name)
         if role and role in member.roles:
-            await member.remove_roles(role, reason="Submitted this period")
+            await member.remove_roles(role, reason="Submitted this round")
+
+    async def sync_seed_not_done(self, guild: Guild, member: Member, should_have: bool) -> None:
+        """Grant or revoke the seed-not-done role to match ``should_have``."""
+        if should_have:
+            await self.grant_seed_not_done(guild, member)
+        else:
+            await self.revoke_seed_not_done(guild, member)
+
+    async def strip_league_roles(self, guild: Guild) -> None:
+        """Remove both league roles from any member who has them (idempotent)."""
+        names = {self._config.participant_role_name, self._config.seed_not_done_role_name}
+        changed = 0
+        for member in guild.members:
+            if not isinstance(member, discord.Member):
+                continue
+            to_remove = [r for r in member.roles if r.name in names]
+            if to_remove:
+                await member.remove_roles(*to_remove, reason="Season ended (cleanup)")
+                changed += 1
+        if changed:
+            log.info("Stripped league roles from %d member(s)", changed)
 
     @staticmethod
     def _as_member(guild: Guild, user: discord.User | discord.Member) -> Optional[discord.User | Member]:
@@ -103,7 +124,7 @@ class RoleManager:
         """Bring the seed-not-done role in line with the database.
 
         A registered participant should have the role iff they have not
-        submitted the active period. No-op when there is no active season
+        submitted the active round. No-op when there is no active season
         (all members lose the role).
         """
         not_done_role = self._find_role(guild, self._config.seed_not_done_role_name)
@@ -112,7 +133,7 @@ class RoleManager:
 
         should_have: set[int] = set()
         if state is not None and state.in_season and state.period_index is not None:
-            should_have = self._db.unsubmitted_ids(state.season, state.period_index)
+            should_have = self._db.unsubmitted_ids(state.season.season_id, state.period_index)
 
         changed = 0
         for member in guild.members:
@@ -139,9 +160,10 @@ class RoleManager:
         not_done_role = await self.seed_not_done_role(guild)
         everyone = guild.default_role
 
+        # Overwrites must be keyed by Role objects (not int ids) in discord.py 2.x.
         overrides = {
-            everyone.id: discord.PermissionOverwrite(view_channel=True),
-            not_done_role.id: discord.PermissionOverwrite(view_channel=False),
+            everyone: discord.PermissionOverwrite(view_channel=True),
+            not_done_role: discord.PermissionOverwrite(view_channel=False),
         }
         await channel.edit(sync_permissions=False, overwrites=overrides,
                            reason="Seed discussion channel: hidden from unsubmitted participants")
