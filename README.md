@@ -13,6 +13,8 @@ A Discord bot for running an asynchronous speedrun league:
     active round. This role is denied view access to the seed discussion
     channel, so the seed chat stays spoiler-free for runners who are still playing.
 
+**DISCLAIMER:** This project has been created with qwen3.8-27b.
+
 ## Project layout
 
 | File | Purpose |
