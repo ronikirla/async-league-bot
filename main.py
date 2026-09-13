@@ -53,6 +53,16 @@ class LeagueBot(commands.Bot):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, self.user.id)
+        # Ensure the League Admin role exists (with Administrator) and that
+        # every configured admin user holds it. This is what makes the
+        # /league_admin command group visible only to the admins.
+        guild = self.get_guild(self.config.guild_id)
+        if guild:
+            try:
+                for admin_id in self.config.admin_ids:
+                    await self.roles.grant_admin(guild, discord.Object(id=admin_id))
+            except Exception:
+                log.exception("Failed to grant the League Admin role at startup")
 
 
 async def reconcile_loop(bot: LeagueBot) -> None:

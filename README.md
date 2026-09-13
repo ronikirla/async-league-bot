@@ -78,24 +78,35 @@ To test the bot **without** Google credentials, set `DRY_RUN=1` in `.env`
 
 ### 4. First-time server setup
 
-1. Run `/league setup` (as an admin) — creates both roles.
-2. Create a text channel for seed discussion, then run
-   `/league setup seed_channel:<the channel>` — applies the permission
+1. Restart the bot — it auto-creates the **League Admin** role (with the
+   Manage Roles permission) and grants it to every user in `ADMIN_IDS`.
+2. Run `/league_admin setup` (as an admin) — creates the participant and
+   seed-not-done roles.
+3. Create a text channel for seed discussion, then run
+   `/league_admin setup seed_channel:<the channel>` — applies the permission
    overrides so it is hidden from members with the *League Seed Not Done* role.
 
 ## Commands
 
-All commands live under a single **`/league`** group.
+Two groups:
 
-### Admin (`ADMIN_IDS` only)
+- **`/league`** — participant commands, visible to everyone.
+- **`/league_admin`** — admin commands, **hidden from members without the
+  Manage Roles permission** (the gate can be switched to Administrator by
+  changing `ADMIN_GROUP_PERMISSION` in [`roles.py`](roles.py) if the bot
+  itself has Administrator). The bot grants that permission to the
+  *League Admin* role (given to the users in `ADMIN_IDS` at startup), so the
+  group only appears for league admins.
+
+### Admin (`/league_admin`, admins only)
 
 | Command | Description |
 |---|---|
-| `/league setup [seed_channel]` | Create/verify both roles; optionally apply the seed-channel permission overrides |
-| `/league create_season round_length rounds start` | Start a new season. `round_length` like `7d`, `12h`, `1d12h`; `start` is ISO 8601 (UTC if no zone) or `now`. Pre-creates sheet rows for all registered participants |
-| `/league season_info` | Season details, active round, current seed, registered count. Also clears registrations from any ended season |
-| `/league add_participant user` | Manually register a user (works even during an active season) |
-| `/league remove_participant user` | Remove a user from the league (roles revoked) |
+| `/league_admin setup [seed_channel]` | Create/verify the league roles; optionally apply the seed-channel permission overrides |
+| `/league_admin create_season round_length rounds start` | Start a new season. `round_length` like `7d`, `12h`, `1d12h`; `start` is ISO 8601 (UTC if no zone) or `now`. Pre-creates sheet rows for all registered participants |
+| `/league_admin season_info` | Season details, active round, current seed, registered count. Also clears registrations from any ended season |
+| `/league_admin add_participant user` | Manually register a user (works even during an active round) |
+| `/league_admin remove_participant user` | Remove a user from the league (roles revoked) |
 
 ### Participants
 
@@ -113,7 +124,7 @@ All commands live under a single **`/league`** group.
   Repeated requests return the same seed without updating the sheet.
 - **Registration lifecycle:** participants register before a season starts
   (or after one ends). When a season ends, **all registrations are cleared**
-  automatically (by the background loop and by `/league season_info`), and
+  automatically (by the background loop and by `/league_admin season_info`), and
   the participant/seed-not-done roles are revoked.
 - **Role sync:** the *Seed Not Done* role is granted/removed event-driven
   (register, seed request, submit) and additionally re-synced by a background

@@ -1,13 +1,16 @@
 """Role management for the league.
 
-Two roles:
+Three roles:
 - **participant role** (e.g. ``League Participant``): gates ``/league seed`` and
-  ``/league submit``. Granted on registration, removed on ``/league remove_participant``.
+  ``/league submit``. Granted on registration, removed on ``/league_admin remove_participant``.
 - **seed-not-done role** (e.g. ``League Seed Not Done``): granted while a
   registered participant has NOT submitted the active round. This role is
   the only permission deny on the seed discussion channel, so unsubmitted
   participants cannot see it (spoiler protection), while submitters and
   non-participants can.
+- **admin role** (``League Admin``): created by the bot at startup with the
+  Administrator permission so that the ``/league_admin`` command group is
+  only visible to the league's admins.
 """
 from __future__ import annotations
 
@@ -28,6 +31,17 @@ class RoleError(Exception):
     """Raised when a required role cannot be found or created."""
 
 
+ADMIN_ROLE_NAME = "League Admin"
+
+# The permission that gates the /league_admin command group's visibility.
+# It must be a permission the BOT itself holds (a bot cannot create or grant
+# a role carrying a permission it lacks, unless it has Administrator).
+# Manage Roles is sufficient and already granted to the bot. If the bot is
+# given the Administrator permission, this can be switched to
+# discord.Permissions(administrator=True) for a tighter gate.
+ADMIN_GROUP_PERMISSION = discord.Permissions(manage_roles=True)
+
+
 class RoleManager:
     def __init__(self, config: Config, db: Database):
         self._config = config
@@ -40,7 +54,8 @@ class RoleManager:
                 return role
         return None
 
-    async def ensure_role(self, guild: Guild, name: str, settings_key: str) -> discord.Role:
+    async def ensure_role(self, guild: Guild, name: str, settings_key: str,
+                          permissions: discord.Permissions | None = None) -> discord.Role:
         """Return the role by name, creating it if missing. Caches its id."""
         role = self._find_role(guild, name)
         if role is None:
@@ -50,10 +65,37 @@ class RoleManager:
                 colour=discord.Colour.default(),
                 hoist=False,
                 mentionable=True,
+                permissions=permissions,
                 reason="Created by async league bot",
             )
         self._db.set_setting(settings_key, str(role.id))
         return role
+
+    async def ensure_admin_role(self, guild: Guild) -> discord.Role:
+        """Create/verify the League Admin role.
+
+        The role carries ``ADMIN_GROUP_PERMISSION``, which is what makes the
+        ``/league_admin`` command group visible to the role's holders and
+        hidden from everyone else.
+        """
+        return await self.ensure_role(
+            guild, ADMIN_ROLE_NAME, "admin_role_id",
+            permissions=ADMIN_GROUP_PERMISSION,
+        )
+
+    async def grant_admin(self, guild: Guild, user: discord.User | discord.Member) -> None:
+        member = self._as_member(guild, user)
+        if member is None or not isinstance(member, Member):
+            log.warning(
+                "Could not find member %s in guild %s - is the ADMIN_IDS entry a "
+                "valid, full Discord user id of someone in the server?",
+                getattr(user, "id", user), guild.id,
+            )
+            return
+        role = await self.ensure_admin_role(guild)
+        if role not in member.roles:
+            await member.add_roles(role, reason="League admin (from .env ADMIN_IDS)")
+            log.info("Granted League Admin role to %s (%s)", member.display_name, member.id)
 
     async def participant_role(self, guild: Guild) -> discord.Role:
         return await self.ensure_role(guild, self._config.participant_role_name, PARTICIPANT_ROLE_KEY)

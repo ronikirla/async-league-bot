@@ -1,8 +1,10 @@
-"""All league commands, grouped under the single ``/league`` prefix.
+"""All league commands.
 
-Discord app-command groups are registered by name, so every command
-(admin and participant) lives in ONE cog that owns the ``league`` group.
-Admin access is enforced per-command with the :func:`admin_only` check.
+- ``/league`` — participant commands, visible to everyone.
+- ``/league_admin`` — admin commands, hidden from members without
+  Administrator-equivalent permissions (the bot auto-creates a
+  ``League Admin`` role with the Administrator permission for this
+  purpose). An in-code :func:`admin_only` check is the final gate.
 """
 from __future__ import annotations
 
@@ -13,16 +15,21 @@ from discord import app_commands
 from discord.ext import commands
 
 from periods import current_season_state
+from roles import ADMIN_GROUP_PERMISSION, ADMIN_ROLE_NAME
 from service import LeagueError, LeagueService
 from util import discord_timestamp
 
 
 def admin_only():
-    """Decorator: restrict a command to configured admin user ids."""
+    """Decorator: restrict a command to configured admin user ids or holders
+    of the League Admin role."""
 
     async def predicate(interaction: app_commands.Interaction) -> bool:
         bot = interaction.client
         if bot.config.is_admin(interaction.user.id):
+            return True
+        member = interaction.guild.get_member(interaction.user.id)
+        if member is not None and any(r.name == ADMIN_ROLE_NAME for r in member.roles):
             return True
         await interaction.response.send_message(
             "❌ You are not a league admin.", ephemeral=True
@@ -39,7 +46,16 @@ class League(commands.Cog):
         self.bot = bot
         self.service: LeagueService = bot.service
 
+    # -- groups --------------------------------------------------------
     league = app_commands.Group(name="league", description="Async speedrun league commands")
+
+    # Hidden from members without the gating permission (the bot grants it
+    # via the League Admin role to the league's admins).
+    league_admin = app_commands.Group(
+        name="league_admin",
+        description="Admin commands for the async speedrun league (admins only)",
+        default_permissions=ADMIN_GROUP_PERMISSION,
+    )
 
     # -- helpers -----------------------------------------------------------
     async def sync_seed_not_done(self, guild: discord.Guild, user: discord.User) -> None:
@@ -53,102 +69,7 @@ class League(commands.Cog):
         submitted = self.bot.db.has_submitted(state.season.season_id, state.period_index, user.id)
         await self.bot.roles.sync_seed_not_done(guild, member, should_have=not submitted)
 
-    # -- admin -----------------------------------------------------------
-
-    @league.command(
-        name="setup",
-        description="Create the league roles and optionally hide the seed channel",
-    )
-    @app_commands.describe(seed_channel="The seed discussion channel to hide from unsubmitted participants")
-    @admin_only()
-    async def setup(self, interaction: app_commands.Interaction,
-                    seed_channel: discord.TextChannel | None = None):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            message = await self.service.setup(interaction.guild, seed_channel)
-        except LeagueError as exc:
-            message = f"❌ {exc}"
-        await interaction.followup.send(message)
-
-    @league.command(name="create_season", description="Start a new league season")
-    @app_commands.describe(
-        round_length="Length of each round, e.g. 7d, 12h, 1d12h (d=days, h=hours, m=minutes)",
-        rounds="Number of rounds in the season",
-        start="Start time of the first round: ISO 8601 (UTC if no zone given) or 'now'",
-    )
-    @admin_only()
-    async def create_season(self, interaction: app_commands.Interaction,
-                            round_length: str, rounds: int, start: str = "now"):
-        # Google Sheets calls can take several seconds; defer so we stay
-        # within Discord's 3-second response window.
-        await interaction.response.defer(ephemeral=True)
-        try:
-            state = await asyncio.to_thread(
-                self.service.create_season, round_length, rounds, start
-            )
-        except LeagueError as exc:
-            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-            return
-        spec = state.season
-        # Grant the seed-not-done role to registered participants of an
-        # already-active round (they have not submitted yet).
-        if state.in_season and state.period_index is not None:
-            for member in interaction.guild.members:
-                if isinstance(member, discord.Member) and self.bot.db.is_participant(member.id):
-                    if not self.bot.db.has_submitted(spec.season_id, state.period_index, member.id):
-                        await self.bot.roles.grant_seed_not_done(interaction.guild, member)
-        embed = discord.Embed(
-            title=f"Season {spec.season_id} created",
-            description=(
-                f"**Round length:** {spec.period_length}\n"
-                f"**Number of rounds:** {spec.num_periods}\n"
-                f"**Start:** {discord_timestamp(spec.start_at)}\n"
-                f"**End:** {discord_timestamp(spec.end_at)}\n\n"
-                "Sheet rows were pre-created for all registered participants."
-            ),
-            colour=discord.Colour.green(),
-        )
-        await interaction.followup.send(embed=embed)
-
-    @league.command(name="season_info", description="Show the current season and active round")
-    @admin_only()
-    async def season_info(self, interaction: app_commands.Interaction):
-        # Clean up registrations from any ended season before reporting.
-        note = self.service.cleanup_ended_season()
-        if note is not None:
-            await self.bot.roles.strip_league_roles(interaction.guild)
-        message = self.service.season_info()
-        if note:
-            message = f"🧹 {note}\n\n{message}"
-        await interaction.response.send_message(message)
-
-    @league.command(name="add_participant", description="Register a user as a league participant")
-    @app_commands.describe(user="The user to register")
-    @admin_only()
-    async def add_participant(self, interaction: app_commands.Interaction, user: discord.User):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            message = await asyncio.to_thread(self.service.add_participant, user)
-        except LeagueError as exc:
-            message = f"❌ {exc}"
-        else:
-            member = interaction.guild.get_member(user.id)
-            if member:
-                await self.bot.roles.grant_participant(interaction.guild, member)
-                await self.sync_seed_not_done(interaction.guild, user)
-        await interaction.followup.send(message)
-
-    @league.command(name="remove_participant", description="Remove a user from the league")
-    @app_commands.describe(user="The user to remove")
-    @admin_only()
-    async def remove_participant(self, interaction: app_commands.Interaction, user: discord.User):
-        message = self.service.remove_participant(user)
-        member = interaction.guild.get_member(user.id)
-        if member:
-            await self.bot.roles.revoke_participant(interaction.guild, member)
-        await interaction.response.send_message(message)
-
-    # -- participants --------------------------------------------------------
+    # -- participants (visible to everyone) --------------------------------
 
     @league.command(name="register", description="Register as a league participant")
     async def register(self, interaction: app_commands.Interaction):
@@ -238,3 +159,98 @@ class League(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
         await self.bot.roles.revoke_seed_not_done(interaction.guild, interaction.user)
+
+    # -- admin (hidden from non-admins) ------------------------------------
+
+    @league_admin.command(
+        name="setup",
+        description="Create the league roles and optionally hide the seed channel",
+    )
+    @app_commands.describe(seed_channel="The seed discussion channel to hide from unsubmitted participants")
+    @admin_only()
+    async def setup(self, interaction: app_commands.Interaction,
+                    seed_channel: discord.TextChannel | None = None):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            message = await self.service.setup(interaction.guild, seed_channel)
+        except LeagueError as exc:
+            message = f"❌ {exc}"
+        await interaction.followup.send(message)
+
+    @league_admin.command(name="create_season", description="Start a new league season")
+    @app_commands.describe(
+        round_length="Length of each round, e.g. 7d, 12h, 1d12h (d=days, h=hours, m=minutes)",
+        rounds="Number of rounds in the season",
+        start="Start time of the first round: ISO 8601 (UTC if no zone given) or 'now'",
+    )
+    @admin_only()
+    async def create_season(self, interaction: app_commands.Interaction,
+                            round_length: str, rounds: int, start: str = "now"):
+        # Google Sheets calls can take several seconds; defer so we stay
+        # within Discord's 3-second response window.
+        await interaction.response.defer(ephemeral=True)
+        try:
+            state = await asyncio.to_thread(
+                self.service.create_season, round_length, rounds, start
+            )
+        except LeagueError as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+            return
+        spec = state.season
+        # Grant the seed-not-done role to registered participants of an
+        # already-active round (they have not submitted yet).
+        if state.in_season and state.period_index is not None:
+            for member in interaction.guild.members:
+                if isinstance(member, discord.Member) and self.bot.db.is_participant(member.id):
+                    if not self.bot.db.has_submitted(spec.season_id, state.period_index, member.id):
+                        await self.bot.roles.grant_seed_not_done(interaction.guild, member)
+        embed = discord.Embed(
+            title=f"Season {spec.season_id} created",
+            description=(
+                f"**Round length:** {spec.period_length}\n"
+                f"**Number of rounds:** {spec.num_periods}\n"
+                f"**Start:** {discord_timestamp(spec.start_at)}\n"
+                f"**End:** {discord_timestamp(spec.end_at)}\n\n"
+                "Sheet rows were pre-created for all registered participants."
+            ),
+            colour=discord.Colour.green(),
+        )
+        await interaction.followup.send(embed=embed)
+
+    @league_admin.command(name="season_info", description="Show the current season and active round")
+    @admin_only()
+    async def season_info(self, interaction: app_commands.Interaction):
+        # Clean up registrations from any ended season before reporting.
+        note = self.service.cleanup_ended_season()
+        if note is not None:
+            await self.bot.roles.strip_league_roles(interaction.guild)
+        message = self.service.season_info()
+        if note:
+            message = f"🧹 {note}\n\n{message}"
+        await interaction.response.send_message(message)
+
+    @league_admin.command(name="add_participant", description="Register a user as a league participant")
+    @app_commands.describe(user="The user to register")
+    @admin_only()
+    async def add_participant(self, interaction: app_commands.Interaction, user: discord.User):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            message = await asyncio.to_thread(self.service.add_participant, user)
+        except LeagueError as exc:
+            message = f"❌ {exc}"
+        else:
+            member = interaction.guild.get_member(user.id)
+            if member:
+                await self.bot.roles.grant_participant(interaction.guild, member)
+                await self.sync_seed_not_done(interaction.guild, user)
+        await interaction.followup.send(message)
+
+    @league_admin.command(name="remove_participant", description="Remove a user from the league")
+    @app_commands.describe(user="The user to remove")
+    @admin_only()
+    async def remove_participant(self, interaction: app_commands.Interaction, user: discord.User):
+        message = self.service.remove_participant(user)
+        member = interaction.guild.get_member(user.id)
+        if member:
+            await self.bot.roles.revoke_participant(interaction.guild, member)
+        await interaction.response.send_message(message)

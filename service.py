@@ -102,7 +102,7 @@ class LeagueService:
             )
         else:
             lines.append(
-                "Seed channel not set. Run `/league setup` with `seed_channel` to hide the seed "
+                "Seed channel not set. Run `/league_admin setup` with `seed_channel` to hide the seed "
                 "discussion from unsubmitted participants."
             )
         return "\n".join(lines)
