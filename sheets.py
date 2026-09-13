@@ -152,7 +152,7 @@ class SheetService:
     # -- season tabs ------------------------------------------------------
     @staticmethod
     def tab_title(season_id: int) -> str:
-        return f"S{season_id}"
+        return f"S{season_id} Raw Data"
 
     def get_or_create_season_tab(self, season_id: int):
         """Return the worksheet for a season, creating it (with headers) if needed.
