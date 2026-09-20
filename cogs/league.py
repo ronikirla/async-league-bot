@@ -66,8 +66,11 @@ class League(commands.Cog):
         member = guild.get_member(user.id)
         if member is None or not isinstance(member, discord.Member):
             return
-        submitted = self.bot.db.has_submitted(state.season.season_id, state.period_index, user.id)
-        await self.bot.roles.sync_seed_not_done(guild, member, should_have=not submitted)
+        done = (
+            self.bot.db.has_submitted(state.season.season_id, state.period_index, user.id)
+            or self.bot.db.has_dnf(state.season.season_id, state.period_index, user.id)
+        )
+        await self.bot.roles.sync_seed_not_done(guild, member, should_have=not done)
 
     # -- participants (visible to everyone) --------------------------------
 
@@ -90,6 +93,9 @@ class League(commands.Cog):
                 and state.in_season
                 and state.period_index is not None
                 and not self.bot.db.has_submitted(
+                    state.season.season_id, state.period_index, interaction.user.id
+                )
+                and not self.bot.db.has_dnf(
                     state.season.season_id, state.period_index, interaction.user.id
                 )
             ):
@@ -133,6 +139,9 @@ class League(commands.Cog):
             and not self.bot.db.has_submitted(
                 state.season.season_id, state.period_index, interaction.user.id
             )
+            and not self.bot.db.has_dnf(
+                state.season.season_id, state.period_index, interaction.user.id
+            )
         ):
             await self.bot.roles.grant_seed_not_done(interaction.guild, interaction.user)
 
@@ -156,6 +165,28 @@ class League(commands.Cog):
                 f"**Submitted at:** {discord_timestamp(result.submitted_at)}"
             ),
             colour=discord.Colour.green(),
+        )
+        await interaction.followup.send(embed=embed)
+        await self.bot.roles.revoke_seed_not_done(interaction.guild, interaction.user)
+
+    @league.command(
+        name="dnf",
+        description="Mark the current round as DNF (did not finish) for you",
+    )
+    async def dnf(self, interaction: app_commands.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await asyncio.to_thread(self.service.dnf, interaction.user)
+        except LeagueError as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="DNF recorded 🏳️",
+            description=(
+                f"**Time:** `{result.run_time}`\n"
+                f"**Marked at:** {discord_timestamp(result.submitted_at)}"
+            ),
+            colour=discord.Colour.red(),
         )
         await interaction.followup.send(embed=embed)
         await self.bot.roles.revoke_seed_not_done(interaction.guild, interaction.user)

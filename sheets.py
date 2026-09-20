@@ -68,7 +68,7 @@ HEADER = [
     "Seed",
     "Seed Requested At (UTC)",
     "Submitted At (UTC)",
-    "Run Time",
+    "Run Time (s)",
     "Video",
 ]
 
@@ -305,21 +305,26 @@ class SheetService:
         period_index: int,
         discord_id: int,
         at: datetime,
-        run_time: str,
+        run_time_value: float | str,
         video_url: str,
     ) -> None:
-        """Write the submission cells, only filling cells that are still empty."""
+        """Write the submission cells, only filling cells that are still empty.
+
+        ``run_time_value`` is either a number (seconds, millisecond precision,
+        so the column can be sorted/averaged) or the text ``"DNF"`` for a
+        round the runner did not finish.
+        """
         self.ensure_season_rows(season)
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:
             self._dry_log("write_submission", season_id=season.season_id,
                           period=period_index, discord_id=discord_id, at=iso_utc(at),
-                          run_time=run_time, video=video_url)
+                          run_time_value=run_time_value, video=video_url)
             return
         row = self._target_row(season, period_index, discord_id)
         cells = (
             (COL_SUBMITTED_AT, iso_utc(at)),
-            (COL_RUN_TIME, run_time),
+            (COL_RUN_TIME, "DNF" if isinstance(run_time_value, str) else round(run_time_value, 3)),
             (COL_VIDEO, video_url),
         )
         updates = []

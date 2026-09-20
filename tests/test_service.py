@@ -96,6 +96,10 @@ def test_full_period_flow(service, tmp_path):
     result = svc.submit(FakeMember(2), "12:34.567", "https://youtu.be/abc")
     assert result.run_time == "12:34.567"
 
+    # The run time is stored numerically (seconds) in the database.
+    rec = db.record_exists(state.season.season_id, 1, 2)
+    assert float(rec["run_time"]) == pytest.approx(754.567)
+
     # Double submission rejected.
     with pytest.raises(LeagueError):
         svc.submit(FakeMember(2), "10:00.000", "https://youtu.be/abc")
@@ -107,15 +111,43 @@ def test_full_period_flow(service, tmp_path):
     assert db.unsubmitted_ids(season_id, 1) == {3}
     assert db.get_period_seed(season_id, 1) == r1.seed
 
-    # Season info mentions the active period and seed.
+    # Season info mentions the active round and seed.
     info = svc.season_info()
     assert "Active round: **1/3**" in info
     assert r1.seed in info
 
     # Dry-run log captured the sheet writes.
-    assert tmp_path is not None  # dry-run log is written to the CWD file
     import os
     assert os.path.exists(DRY_RUN_LOG_FILE)
+
+
+def test_dnf_flow(service, tmp_path):
+    """A runner who did not finish can mark the round DNF."""
+    svc, db = service
+    now = datetime.now(timezone.utc)
+    # Registration is closed during an active round, so use the admin path.
+    state = svc.create_season("7d", 3, (now - timedelta(days=1)).isoformat())
+    svc.add_participant(FakeMember(5, "dnfer"))
+
+    result = svc.dnf(FakeMember(5))
+    assert result.run_time == "DNF"
+    assert db.has_dnf(state.season.season_id, 1, 5)
+    # A DNF counts as done: role reconciliation treats them as not needing the role.
+    assert 5 not in db.unsubmitted_ids(state.season.season_id, 1)
+
+    # DNF again -> rejected.
+    with pytest.raises(LeagueError):
+        svc.dnf(FakeMember(5))
+
+    # A submitted runner cannot DNF, and a DNF'd runner cannot submit.
+    svc.add_participant(FakeMember(6, "submitter"))
+    svc.submit(FakeMember(6), "10:00.000", "https://youtu.be/x")
+    with pytest.raises(LeagueError):
+        svc.dnf(FakeMember(6))
+    svc.add_participant(FakeMember(7, "dnfer2"))
+    svc.dnf(FakeMember(7))
+    with pytest.raises(LeagueError):
+        svc.submit(FakeMember(7), "10:00.000", "https://youtu.be/x")
 
 
 def test_season_boundary(service):

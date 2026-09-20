@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS period_records (
     submitted_at_utc TEXT,
     run_time TEXT,
     video_url TEXT,
+    dnf INTEGER NOT NULL DEFAULT 0,
     UNIQUE (season_id, period_index, discord_id)
 );
 
@@ -66,6 +67,12 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        # Migration for databases created before the DNF column existed.
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(period_records)")}
+        if "dnf" not in cols:
+            self._conn.execute(
+                "ALTER TABLE period_records ADD COLUMN dnf INTEGER NOT NULL DEFAULT 0"
+            )
         self._conn.commit()
 
     def close(self) -> None:
@@ -220,7 +227,7 @@ class Database:
         season_id: int,
         period_index: int,
         discord_id: int,
-        run_time: str,
+        run_time: float,
         video_url: str,
     ) -> bool:
         """Store the submission. Returns False if already submitted.
@@ -240,24 +247,54 @@ class Database:
         rows = self.query(
             "SELECT 1 FROM period_records "
             "WHERE season_id = ? AND period_index = ? AND discord_id = ? "
-            "AND submitted_at_utc IS NOT NULL",
+            "AND submitted_at_utc IS NOT NULL AND dnf = 0",
             (season_id, period_index, discord_id),
         )
         return bool(rows)
 
-    def unsubmitted_ids(self, season_id: int, period_index: int) -> set[int]:
-        """Registered participants who have NOT submitted this period yet."""
-        participant_rows = self.query("SELECT discord_id FROM participants")
-        submitted = self.submitted_ids(season_id, period_index)
-        return {int(r["discord_id"]) for r in participant_rows} - submitted
+    def has_dnf(self, season_id: int, period_index: int, discord_id: int) -> bool:
+        rows = self.query(
+            "SELECT 1 FROM period_records "
+            "WHERE season_id = ? AND period_index = ? AND discord_id = ? "
+            "AND dnf = 1",
+            (season_id, period_index, discord_id),
+        )
+        return bool(rows)
 
-    def submitted_ids(self, season_id: int, period_index: int) -> set[int]:
+    def mark_dnf(self, season_id: int, period_index: int, discord_id: int) -> bool:
+        """Mark the round as DNF (did not finish). Returns False if already
+        submitted or already marked DNF.
+
+        Creates the record first if it does not exist yet (defensive).
+        """
+        self.create_record(season_id, period_index, discord_id)
+        cur = self.execute(
+            "UPDATE period_records SET dnf = 1, submitted_at_utc = ? "
+            "WHERE season_id = ? AND period_index = ? AND discord_id = ? "
+            "AND dnf = 0 AND submitted_at_utc IS NULL",
+            (utcnow_iso(), season_id, period_index, discord_id),
+        )
+        return cur.rowcount == 1
+
+    def unsubmitted_ids(self, season_id: int, period_index: int) -> set[int]:
+        """Registered participants who have NOT submitted or DNF'd this round."""
+        participant_rows = self.query("SELECT discord_id FROM participants")
+        done = self.done_ids(season_id, period_index)
+        return {int(r["discord_id"]) for r in participant_rows} - done
+
+    def done_ids(self, season_id: int, period_index: int) -> set[int]:
+        """Participants who have reported for the round (submitted OR DNF'd)."""
         rows = self.query(
             "SELECT discord_id FROM period_records "
-            "WHERE season_id = ? AND period_index = ? AND submitted_at_utc IS NOT NULL",
+            "WHERE season_id = ? AND period_index = ? AND "
+            "(submitted_at_utc IS NOT NULL OR dnf = 1)",
             (season_id, period_index),
         )
         return {int(r["discord_id"]) for r in rows}
+
+    # Backwards-compatible alias (a DNF also counts as "done").
+    def submitted_ids(self, season_id: int, period_index: int) -> set[int]:
+        return self.done_ids(season_id, period_index)
 
     def participant_sheet_row(self, discord_id: int) -> Optional[int]:
         """Deterministic 1-based spreadsheet row for a participant.

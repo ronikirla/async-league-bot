@@ -62,7 +62,10 @@ A Discord bot for running an asynchronous speedrun league:
    (the `client_email` in the JSON) as an **Editor**.
 5. The bot creates one tab per season (`S1`, `S2`, …) with headers:
    `Round | Round Start (UTC) | Round End (UTC) | Participant | Discord ID |
-   Seed | Seed Requested At (UTC) | Submitted At (UTC) | Run Time | Video`.
+   Seed | Seed Requested At (UTC) | Submitted At (UTC) | Run Time (s) | Video`.
+   The run time is stored as a **number** (seconds, millisecond precision)
+   so the column can be sorted and used for averages. A round the runner did
+   not finish is stored as the text `DNF` in the same column.
    Rows are pre-created for every registered participant; cells are updated
    in place and never clobbered. All timestamps are UTC ISO 8601.
 
@@ -118,6 +121,7 @@ Two groups:
 | `/league unregister` | Leave the league. Same timing restriction as registration |
 | `/league seed` | Request the current round's seed (ephemeral reply). One seed per round for everyone; the sheet records only the **first** request time |
 | `/league submit time video` | Submit your run. `time` = `M:SS` or `H:MM:SS` with optional `.mmm`; `video` = http(s) link. Submissions are final per round |
+| `/league dnf` | Mark the round as **DNF** (did not finish) — writes the text `DNF` into the run-time cell of the sheet. Final per round, mutually exclusive with `/league submit` |
 
 ## Behavior notes
 

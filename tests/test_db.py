@@ -48,9 +48,9 @@ def test_submission_is_final(db):
     season_id = db.create_season(86400, 2, "2026-09-10T00:00:00")
     db.create_record(season_id, 1, 1)
     assert not db.has_submitted(season_id, 1, 1)
-    assert db.mark_submitted(season_id, 1, 1, "10:00.000", "https://youtu.be/x") is True
+    assert db.mark_submitted(season_id, 1, 1, 600.0, "https://youtu.be/x") is True
     assert db.has_submitted(season_id, 1, 1)
-    assert db.mark_submitted(season_id, 1, 1, "9:59.000", "https://youtu.be/y") is False
+    assert db.mark_submitted(season_id, 1, 1, 599.0, "https://youtu.be/y") is False
     # Other period is independent.
     db.create_record(season_id, 2, 1)
     assert not db.has_submitted(season_id, 2, 1)
@@ -63,7 +63,7 @@ def test_unsubmitted_ids(db):
     season_id = db.create_season(86400, 2, "2026-09-10T00:00:00")
     for pid in (1, 2, 3):
         db.create_record(season_id, 1, pid)
-    db.mark_submitted(season_id, 1, 2, "10:00.000", "https://youtu.be/x")
+    db.mark_submitted(season_id, 1, 2, 600.0, "https://youtu.be/x")
     assert db.unsubmitted_ids(season_id, 1) == {1, 3}
 
 

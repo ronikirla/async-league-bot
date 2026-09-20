@@ -299,15 +299,18 @@ class LeagueService:
         if not is_http_url(video_text.strip()):
             raise LeagueError("Video must be an http(s) link, e.g. a YouTube URL.")
 
-        if self.db.has_submitted(spec.season_id, period_index, member.id):
+        if self.db.has_submitted(spec.season_id, period_index, member.id) or \
+                self.db.has_dnf(spec.season_id, period_index, member.id):
             # Self-heal: a previous sheet write may have been lost.
             self._sync_submission_to_sheet(spec, period_index, member.id, quiet=True)
-            raise LeagueError("You already submitted a time for this round. Submissions are final.")
+            raise LeagueError(
+                "You already reported this round (submitted or DNF). Reports are final."
+            )
 
         self.db.create_record(spec.season_id, period_index, member.id)
         at = now_utc()
         stored = self.db.mark_submitted(
-            spec.season_id, period_index, member.id, format_run_time(seconds), video_text.strip()
+            spec.season_id, period_index, member.id, round(seconds, 3), video_text.strip()
         )
         if not stored:
             raise LeagueError("You already submitted a time for this round.")
@@ -315,18 +318,42 @@ class LeagueService:
         self._sync_submission_to_sheet(spec, period_index, member.id)
         return SubmitResult(run_time=format_run_time(seconds), submitted_at=at)
 
+    def dnf(self, member: discord.Member) -> SubmitResult:
+        """Mark the current round as DNF (did not finish) for the member."""
+        self.require_participant(member)
+        state, period_index = self.require_active()
+        spec = self._spec(state)
+
+        if self.db.has_dnf(spec.season_id, period_index, member.id):
+            # Self-heal: a previous sheet write may have been lost.
+            self._sync_submission_to_sheet(spec, period_index, member.id, quiet=True)
+            raise LeagueError("You already marked this round as DNF. Reports are final.")
+        if self.db.has_submitted(spec.season_id, period_index, member.id):
+            raise LeagueError("You already submitted a time for this round. You cannot DNF it.")
+
+        at = now_utc()
+        stored = self.db.mark_dnf(spec.season_id, period_index, member.id)
+        if not stored:
+            raise LeagueError("You already reported this round (submitted or DNF).")
+
+        self._sync_submission_to_sheet(spec, period_index, member.id)
+        return SubmitResult(run_time="DNF", submitted_at=at)
+
     def _sync_submission_to_sheet(
         self, season: SeasonSpec, period_index: int, discord_id: int, quiet: bool = False
     ) -> None:
-        """Write the DB-stored submission to the sheet (idempotent self-heal)."""
+        """Write the DB-stored report to the sheet (idempotent self-heal)."""
         record = self.db.record_exists(season.season_id, period_index, discord_id)
         if record is None or record["submitted_at_utc"] is None:
             return
+        dnf = int(record["dnf"] or 0) == 1
+        run_time_value: float | str = "DNF" if dnf else float(record["run_time"])
+        video_url = record["video_url"] or ""
         try:
             self.sheets.write_submission(
                 season, period_index, discord_id,
                 datetime.fromisoformat(record["submitted_at_utc"]),
-                record["run_time"], record["video_url"],
+                run_time_value, video_url,
             )
         except SheetsError as exc:
             if quiet:

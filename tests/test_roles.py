@@ -80,7 +80,7 @@ def test_reconcile_with_real_state(env):
     db.add_participant(2, "b")
     for pid in (1, 2):
         db.create_record(season_id, 1, pid)
-    db.mark_submitted(season_id, 1, 2, "10:00.000", "https://youtu.be/x")
+    db.mark_submitted(season_id, 1, 2, 600.0, "https://youtu.be/x")
 
     state = current_season_state(db)
     assert state is not None and state.in_season
