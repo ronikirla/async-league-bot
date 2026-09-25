@@ -55,7 +55,12 @@ Columns: `Period | Period Start (UTC) | Period End (UTC) | Participant | Discord
 ## Role & permission design
 
 - `league participant`: granted on register, removed on `/remove-participant`.
-- `league seed not done`: event-driven (grant on register/period start if unsubmitted, remove on submit) **plus** a periodic reconciliation task (every 30 min + on period boundary) so state self-heals.
+- `league seed not done`: event-driven — granted at round start (inline with the
+  round-start announcement) and on register/seed, removed on submit/DNF, and
+  stripped from everyone at season end. No periodic reconciliation:
+  season/round moments fire from **exact timers** (restored + caught up on boot)
+  instead of a background polling loop. Round ends are not announced; the
+  round-start sync covers each boundary (rounds are contiguous).
 - Seed channel overrides: `@everyone` → view allow; `league seed not done` → view **deny**. Discord resolves deny-over-allow, yielding exactly: non-participants and submitters can see it; unsubmitted participants cannot.
 
 ## Flows

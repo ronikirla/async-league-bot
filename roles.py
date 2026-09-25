@@ -4,10 +4,9 @@ Three roles:
 - **participant role** (e.g. ``League Participant``): gates ``/league seed`` and
   ``/league submit``. Granted on registration, removed on ``/league_admin remove_participant``.
 - **seed-not-done role** (e.g. ``League Seed Not Done``): granted while a
-  registered participant has NOT submitted the active round. This role is
-  the only permission deny on the seed discussion channel, so unsubmitted
-  participants cannot see it (spoiler protection), while submitters and
-  non-participants can.
+  registered participant has NOT submitted the active round. Granted at round
+  start (inline with the round-start announcement) and removed on submission
+  or when the round ends — there is no background reconciliation.
 - **admin role** (``League Admin``): created by the bot at startup with the
   Administrator permission so that the ``/league_admin`` command group is
   only visible to the league's admins.
@@ -21,8 +20,14 @@ import discord
 from discord import Guild, Member
 
 from config import Config
-from db import Database, PARTICIPANT_ROLE_KEY, SEED_NOT_DONE_ROLE_KEY, SEED_CHANNEL_KEY
-from periods import SeasonState
+from db import (
+    ANNOUNCE_CHANNEL_KEY,
+    Database,
+    PARTICIPANT_ROLE_KEY,
+    SEED_NOT_DONE_ROLE_KEY,
+    SEED_CHANNEL_KEY,
+)
+from periods import SeasonSpec
 
 log = logging.getLogger("league")
 
@@ -141,6 +146,88 @@ class RoleManager:
         else:
             await self.revoke_seed_not_done(guild, member)
 
+    # -- round-boundary role routines -----------------------------------
+    # These are attached to the announcement routines in service.py so that
+    # role changes happen exactly when the round starts/ends - no timers of
+    # their own and no periodic reconciliation.
+
+    async def on_round_start(self, guild: Guild, spec: SeasonSpec, period_index: int) -> None:
+        """Sync the seed-not-done role for the round that just started.
+
+        Every registered participant who has not reported the round gains
+        the role; anyone holding it who already reported (or is not
+        registered anymore) loses it. Runs inline with the round-start
+        announcement — on time for a live round, or as a catch-up when the
+        bot restores its timers after a restart.
+        """
+        role = self._find_role(guild, self._config.seed_not_done_role_name)
+        if role is None:
+            return  # /setup has not run yet
+        should_have = self._db.unsubmitted_ids(spec.season_id, period_index)
+        changed = 0
+        for member in guild.members:
+            if not isinstance(member, Member):
+                continue
+            has_role = role in member.roles
+            should = member.id in should_have
+            if should and not has_role:
+                await member.add_roles(role, reason="Round started")
+                changed += 1
+            elif has_role and not should:
+                await member.remove_roles(role, reason="Already reported this round")
+                changed += 1
+        if changed:
+            log.info("Round start: adjusted seed-not-done role for %d member(s)", changed)
+
+    async def on_round_end(self, guild: Guild, spec: SeasonSpec, period_index: int) -> None:
+        """Revoke the seed-not-done role from everyone at round end.
+
+        The round is over, so nobody is "not done" anymore. Runs inline with
+        the round-end announcement.
+        """
+        role = self._find_role(guild, self._config.seed_not_done_role_name)
+        if role is None:
+            return
+        for member in guild.members:
+            if isinstance(member, Member) and role in member.roles:
+                await member.remove_roles(role, reason="Round ended")
+
+    # -- announcements ---------------------------------------------------
+    async def announce_channel(self, guild: Guild) -> Optional[discord.TextChannel]:
+        """The channel configured for season/round announcements, if any."""
+        channel_id = self.get_announce_channel_id()
+        if channel_id is None:
+            return None
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        # The channel may not be in cache yet (e.g. right after startup).
+        try:
+            fetched = await guild.fetch_channel(channel_id)
+        except discord.HTTPException:
+            return None
+        return fetched if isinstance(fetched, discord.TextChannel) else None
+
+    async def announce(self, guild: Guild, message: str) -> bool:
+        """Post ``message`` to the announcement channel. Returns success."""
+        channel = await self.announce_channel(guild)
+        if channel is None:
+            log.warning(
+                "No announcement channel configured; skipping announcement. "
+                "Run /league_admin setup with announce_channel."
+            )
+            return False
+        try:
+            await channel.send(message)
+        except discord.HTTPException:
+            log.exception("Failed to send announcement to #%s", channel.name)
+            return False
+        return True
+
+    def get_announce_channel_id(self) -> Optional[int]:
+        value = self._db.get_setting(ANNOUNCE_CHANNEL_KEY)
+        return int(value) if value else None
+
     async def strip_league_roles(self, guild: Guild) -> None:
         """Remove both league roles from any member who has them (idempotent)."""
         names = {self._config.participant_role_name, self._config.seed_not_done_role_name}
@@ -161,38 +248,12 @@ class RoleManager:
             return user
         return guild.get_member(user.id)
 
-    # -- reconciliation -------------------------------------------------
-    async def reconcile(self, guild: Guild, state: Optional[SeasonState]) -> None:
-        """Bring the seed-not-done role in line with the database.
-
-        A registered participant should have the role iff they have not
-        submitted the active round. No-op when there is no active season
-        (all members lose the role).
-        """
-        not_done_role = self._find_role(guild, self._config.seed_not_done_role_name)
-        if not_done_role is None:
-            return  # /setup has not run yet
-
-        should_have: set[int] = set()
-        if state is not None and state.in_season and state.period_index is not None:
-            should_have = self._db.unsubmitted_ids(state.season.season_id, state.period_index)
-
-        changed = 0
-        for member in guild.members:
-            if not isinstance(member, discord.Member):
-                continue
-            has_role = not_done_role in member.roles
-            should = member.id in should_have
-            if has_role and not should:
-                await member.remove_roles(not_done_role, reason="Reconcile: submitted")
-                changed += 1
-            elif should and not has_role:
-                await member.add_roles(not_done_role, reason="Reconcile: not submitted")
-                changed += 1
-        if changed:
-            log.info("Reconciliation adjusted %d members", changed)
-
     # -- seed channel permissions ---------------------------------------
+    async def apply_announce_channel(self, guild: Guild, channel: discord.TextChannel) -> None:
+        """Remember ``channel`` as the season/round announcement channel."""
+        self._db.set_setting(ANNOUNCE_CHANNEL_KEY, str(channel.id))
+        log.info("Announcement channel set to #%s (id %s)", channel.name, channel.id)
+
     async def apply_seed_channel_permissions(self, guild: Guild, channel: discord.TextChannel) -> None:
         """Apply the spoiler-protecting overrides to the seed discussion channel.
 

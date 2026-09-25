@@ -47,12 +47,21 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Season/round events whose announcement was fully posted. Catch-up on
+-- boot replays only events NOT recorded here, so a restart never re-posts
+-- an announcement that was already sent.
+CREATE TABLE IF NOT EXISTS dispatched_events (
+    key TEXT PRIMARY KEY,
+    dispatched_at_utc TEXT NOT NULL
+);
 """
 
 SettingKey = str
 PARTICIPANT_ROLE_KEY = "participant_role_id"
 SEED_NOT_DONE_ROLE_KEY = "seed_not_done_role_id"
 SEED_CHANNEL_KEY = "seed_channel_id"
+ANNOUNCE_CHANNEL_KEY = "announce_channel_id"
 
 
 def utcnow_iso() -> str:
@@ -100,6 +109,32 @@ class Database:
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
+        )
+
+    # -- dispatched event markers ---------------------------------------
+    @staticmethod
+    def _event_key(season_id: int, kind: str, period_index: Optional[int]) -> str:
+        period = period_index if period_index is not None else "season"
+        return f"{season_id}:{kind}:{period}"
+
+    def is_event_dispatched(
+        self, season_id: int, kind: str, period_index: Optional[int]
+    ) -> bool:
+        """True once this event's announcement has been fully posted."""
+        rows = self.query(
+            "SELECT 1 FROM dispatched_events WHERE key = ?",
+            (self._event_key(season_id, kind, period_index),),
+        )
+        return bool(rows)
+
+    def mark_event_dispatched(
+        self, season_id: int, kind: str, period_index: Optional[int]
+    ) -> None:
+        """Record that an event was fully dispatched (idempotent)."""
+        self.execute(
+            "INSERT OR IGNORE INTO dispatched_events (key, dispatched_at_utc) "
+            "VALUES (?, ?)",
+            (self._event_key(season_id, kind, period_index), utcnow_iso()),
         )
 
     # -- seasons --------------------------------------------------------

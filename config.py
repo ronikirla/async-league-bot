@@ -55,7 +55,6 @@ class Config:
     participant_role_name: str
     seed_not_done_role_name: str
     dry_run: bool
-    reconcile_minutes: int
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
@@ -68,13 +67,6 @@ def load_config() -> Config:
         guild_id = int(_require("GUILD_ID"))
     except ValueError as exc:
         raise ConfigError("GUILD_ID must be a numeric Discord guild id") from exc
-
-    try:
-        reconcile_minutes = int(os.getenv("RECONCILE_MINUTES", "15") or "15")
-    except ValueError as exc:
-        raise ConfigError("RECONCILE_MINUTES must be an integer") from exc
-    if reconcile_minutes <= 0:
-        raise ConfigError("RECONCILE_MINUTES must be positive")
 
     dry_run = os.getenv("DRY_RUN", "").strip() == "1"
 
@@ -101,5 +93,4 @@ def load_config() -> Config:
         seed_not_done_role_name=os.getenv("SEED_NOT_DONE_ROLE_NAME", DEFAULT_SEED_NOT_DONE_ROLE).strip()
         or DEFAULT_SEED_NOT_DONE_ROLE,
         dry_run=dry_run,
-        reconcile_minutes=reconcile_minutes,
     )

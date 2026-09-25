@@ -6,7 +6,7 @@ import pytest
 
 from config import Config
 from db import Database
-from periods import current_season_state
+from periods import SeasonSpec
 from roles import RoleManager
 
 
@@ -62,14 +62,15 @@ class FakeGuild:
 @pytest.fixture
 def env(tmp_path):
     db = Database(str(tmp_path / "test.db"))
-    cfg = Config("x", 1, (1,), "x", "x", "P", "S", True, 15)
+    cfg = Config("x", 1, (1,), "x", "x", "P", "S", True)
     rm = RoleManager(cfg, db)
     yield db, rm
     db.close()
 
 
-def test_reconcile_with_real_state(env):
-    """Regression: reconcile must pass the integer season id to the DB layer."""
+def test_round_start_grants_role_to_unsubmitted(env):
+    """Round start grants the seed-not-done role to participants who have
+    not reported the new round, and removes it from non-participants."""
     import asyncio
 
     db, rm = env
@@ -82,32 +83,49 @@ def test_reconcile_with_real_state(env):
         db.create_record(season_id, 1, pid)
     db.mark_submitted(season_id, 1, 2, 600.0, "https://youtu.be/x")
 
-    state = current_season_state(db)
-    assert state is not None and state.in_season
-
     not_done_role = FakeRole("S")
-    member1 = FakeMember(1, [])                 # unsubmitted -> should gain the role
-    member2 = FakeMember(2, [not_done_role])    # submitted   -> should lose the role
+    member1 = FakeMember(1, [FakeRole("P")])                 # unsubmitted -> gains the role
+    member2 = FakeMember(2, [FakeRole("P"), not_done_role])  # submitted   -> loses the role
     guild = FakeGuild(members=[member1, member2], roles=[FakeRole("P"), not_done_role])
 
-    # This used to crash with:
-    #   sqlite3.ProgrammingError: Error binding parameter 1: type 'SeasonSpec'
-    asyncio.run(rm.reconcile(guild, state))
+    spec = SeasonSpec(season_id=season_id, start_at=datetime.fromisoformat(start),
+                      period_length=timedelta(days=7), num_periods=3)
+    asyncio.run(rm.on_round_start(guild, spec, 1))
 
     assert not_done_role in member1.added
     assert not_done_role in member2.removed
 
 
-def test_reconcile_no_state(env):
-    """Without an active season, everyone loses the seed-not-done role."""
+def test_round_end_strips_role_from_everyone(env):
+    """Round end revokes the seed-not-done role from all members."""
     import asyncio
 
     db, rm = env
     not_done_role = FakeRole("S")
     member1 = FakeMember(1, [not_done_role])
-    guild = FakeGuild(members=[member1], roles=[FakeRole("P"), not_done_role])
+    member2 = FakeMember(2, [])
+    guild = FakeGuild(members=[member1, member2], roles=[FakeRole("P"), not_done_role])
 
-    asyncio.run(rm.reconcile(guild, None))
+    spec = SeasonSpec(season_id=1, start_at=datetime.now(timezone.utc),
+                      period_length=timedelta(days=7), num_periods=1)
+    asyncio.run(rm.on_round_end(guild, spec, 1))
 
     assert not_done_role in member1.removed
+    assert not member2.added
+
+
+def test_round_routines_are_noops_without_setup(env):
+    """The round routines do nothing when /setup has not created the role."""
+    import asyncio
+
+    db, rm = env
+    member1 = FakeMember(1, [])
+    guild = FakeGuild(members=[member1], roles=[FakeRole("P")])
+    spec = SeasonSpec(season_id=1, start_at=datetime.now(timezone.utc),
+                      period_length=timedelta(days=7), num_periods=1)
+
+    asyncio.run(rm.on_round_start(guild, spec, 1))
+    asyncio.run(rm.on_round_end(guild, spec, 1))
+
     assert not member1.added
+    assert not member1.removed

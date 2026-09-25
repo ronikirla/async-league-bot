@@ -12,19 +12,25 @@ A Discord bot for running an asynchronous speedrun league:
   - **League Seed Not Done** — granted while a participant has NOT submitted the
     active round. This role is denied view access to the seed discussion
     channel, so the seed chat stays spoiler-free for runners who are still playing.
+- The bot **announces** every season/round moment in a configured channel:
+  each round start (round 1's start doubles as the season start), a
+  **24h-before-deadline reminder** (pinging the *League Seed Not Done* role),
+  and the season end — driven by exact timers that are restored (and caught
+  up) on every boot. Round ends are not announced.
 
-**DISCLAIMER:** This project has been created with qwen3.8-27b.
+**DISCLAIMER:** This project has been created with Qwen3.8-27b and GLM-5.3-Flash.
 
 ## Project layout
 
 | File | Purpose |
 |---|---|
-| [`main.py`](main.py) | Bot entry point: connects, syncs commands, runs the reconciliation loop (roles + season-end cleanup) |
+| [`main.py`](main.py) | Bot entry point: connects, syncs commands, restores the season/round event timers (and replays missed events) |
 | [`config.py`](config.py) | Loads/validates `.env` configuration |
 | [`db.py`](db.py) | SQLite persistence (seasons, participants, period records, settings) |
 | [`periods.py`](periods.py) | Season/round math (clock-derived active round) + time parsing |
+| [`scheduler.py`](scheduler.py) | Exact timers for every season/round event + boot-time catch-up |
 | [`sheets.py`](sheets.py) | Google Sheets sync via `gspread` (dry-run aware, idempotent writes) |
-| [`roles.py`](roles.py) | Role creation/granting/revocation + reconciliation |
+| [`roles.py`](roles.py) | Role creation/granting/revocation + round-boundary role routines + announcements |
 | [`service.py`](service.py) | High-level operations used by the commands |
 | [`cogs/league.py`](cogs/league.py) | All slash commands (single `/league` group) |
 | [`tests/`](tests/) | Unit + end-to-end (dry-run) tests |
@@ -88,8 +94,12 @@ To test the bot **without** Google credentials, set `DRY_RUN=1` in `.env`
 2. Run `/league_admin setup` (as an admin) — creates the participant and
    seed-not-done roles.
 3. Create a text channel for seed discussion, then run
-   `/league_admin setup seed_channel:<the channel>` — applies the permission
-   overrides so it is hidden from members with the *League Seed Not Done* role.
+   `/league_admin setup seed_channel:<the channel> announce_channel:<the channel>` —
+   applies the permission overrides so the seed channel is hidden from members
+   with the *League Seed Not Done* role, and points the season/round
+   announcements at the announce channel.
+   (If no announce channel is configured, announcements are skipped with a log
+   message — so set it before creating a season.)
 
 ## Commands
 
@@ -107,9 +117,9 @@ Two groups:
 
 | Command | Description |
 |---|---|
-| `/league_admin setup [seed_channel]` | Create/verify the league roles; optionally apply the seed-channel permission overrides |
-| `/league_admin create_season round_length rounds start` | Start a new season. `round_length` like `7d`, `12h`, `1d12h`; `start` is ISO 8601 (UTC if no zone) or `now`. Pre-creates sheet rows for all registered participants |
-| `/league_admin season_info` | Season details, active round, current seed, registered count. Also clears registrations from any ended season |
+| `/league_admin setup [seed_channel] [announce_channel]` | Create/verify the league roles; optionally apply the seed-channel permission overrides and pick the announcement channel |
+| `/league_admin create_season round_length rounds start` | Start a new season. `round_length` like `7d`, `12h`, `1d12h`; `start` is ISO 8601 (UTC if no zone) or `now`. Pre-creates sheet rows for all registered participants and arms every announcement timer |
+| `/league_admin season_info` | Season details, active round, current seed, registered count |
 | `/league_admin add_participant user` | Manually register a user (works even during an active round) |
 | `/league_admin remove_participant user` | Remove a user from the league (roles revoked) |
 
@@ -125,23 +135,38 @@ Two groups:
 
 ## Behavior notes
 
+- **Announcements:** the bot posts to the configured announce channel when
+  each round starts (`Season N — Round i/N has started`; round 1's message
+  doubles as the season-start announcement), **24 hours before a round ends**
+  (pinging everyone who has not submitted yet), and when the season ends.
+  Round ends are **not** announced — rounds are contiguous, so the next
+  round's start message already says when the previous one ended.
+  Creating a season with a future start also announces that sign-ups are open.
+- **Exact timers, no polling:** every announcement is scheduled as a precise
+  `asyncio` timer derived from the season spec, with all delays computed from
+  a single clock snapshot so same-day timers fire in order. On boot the bot
+  re-derives all timers from the database, **replays every event that should
+  have already happened** (in order), and arms the rest. Each announcement is
+  recorded as sent once posted, so a restart replays only what was truly
+  missed — never one that was already announced. Creating a new
+  season re-arms the timers and drops any stale ones.
+- **Role changes ride along with the announcements:** the seed-not-done role
+  is granted at round start (to everyone who has not reported the new round;
+  the same sync revokes it from stale holders), removed when a participant
+  submits or DNFs, and stripped from everyone at season end. There is no
+  background reconciliation loop.
 - **Seeds:** a single seed per round for the whole league, random in
   `0–9999999999` (inclusive), generated on the first `/league seed` of the round.
   Repeated requests return the same seed without updating the sheet.
 - **Registration lifecycle:** participants register before a season starts
   (or after one ends). When a season ends, **all registrations are cleared**
-  automatically (by the background loop and by `/league_admin season_info`), and
-  the participant/seed-not-done roles are revoked.
-- **Role sync:** the *Seed Not Done* role is granted/removed event-driven
-  (register, seed request, submit) and additionally re-synced by a background
-  task every `RECONCILE_MINUTES` (default 15 min), so it self-heals across
-  restarts and round boundaries.
+  automatically (by the season-end event) and both league roles are revoked.
 - **Sheet writes are idempotent:** a cell is only filled when empty, and row
   pre-creation merges with existing values, so re-runs or stale reads can
   never overwrite a seed, timestamp, or submission. If a write to the sheet
   fails, the next `/league seed` or `/league submit` re-syncs the
   database-stored value into the empty cell.
-- **Season rollover:** the active round is derived from the UTC clock, so
+- **Round rollover:** the active round is derived from the UTC clock, so
   rounds advance automatically; no restart needed.
 
 ## Testing

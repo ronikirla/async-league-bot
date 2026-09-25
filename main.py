@@ -4,8 +4,9 @@ Usage:
     python main.py
 
 Reads configuration from ``.env`` (see ``.env.example``), connects to
-Discord, syncs the guild-scoped slash command tree, and starts a periodic
-role reconciliation loop.
+Discord, syncs the guild-scoped slash command tree, and restores the
+season/round event timers (running any events that should have already
+happened while the bot was offline).
 """
 from __future__ import annotations
 
@@ -18,7 +19,6 @@ from discord.ext import commands
 from cogs.league import League
 from config import ConfigError, load_config
 from db import Database
-from periods import current_season_state
 from roles import RoleManager
 from service import LeagueService
 from sheets import SheetService
@@ -63,26 +63,9 @@ class LeagueBot(commands.Bot):
                     await self.roles.grant_admin(guild, discord.Object(id=admin_id))
             except Exception:
                 log.exception("Failed to grant the League Admin role at startup")
-
-
-async def reconcile_loop(bot: LeagueBot) -> None:
-    """Periodically re-sync the 'seed not done' role with the database.
-
-    Also clears all registrations (and their roles) once a season ends.
-    """
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        try:
-            guild = bot.get_guild(bot.config.guild_id)
-            if guild:
-                # A season may have ended: wipe registrations and strip roles.
-                if bot.service.cleanup_ended_season() is not None:
-                    await bot.roles.strip_league_roles(guild)
-                state = current_season_state(bot.db)
-                await bot.roles.reconcile(guild, state)
-        except Exception:
-            log.exception("Role reconciliation failed")
-        await asyncio.sleep(bot.config.reconcile_minutes * 60)
+        # Restore the exact event timers and run any season/round events that
+        # should have already happened while the bot was offline.
+        self.service.start_scheduler(lambda: self.get_guild(self.config.guild_id))
 
 
 async def run() -> None:
@@ -96,9 +79,9 @@ async def run() -> None:
     bot = LeagueBot(config, db, roles, sheets, service)
     try:
         async with bot:
-            bot.loop.create_task(reconcile_loop(bot))
             await bot.start(config.token)
     finally:
+        service.scheduler.stop()
         db.close()
 
 

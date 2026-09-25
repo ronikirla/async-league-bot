@@ -17,7 +17,7 @@ from discord.ext import commands
 from periods import current_season_state
 from roles import ADMIN_GROUP_PERMISSION, ADMIN_ROLE_NAME
 from service import LeagueError, LeagueService
-from util import discord_timestamp
+from util import discord_timestamp, format_duration, now_utc
 
 
 def admin_only():
@@ -195,17 +195,24 @@ class League(commands.Cog):
 
     @league_admin.command(
         name="setup",
-        description="Create the league roles and optionally hide the seed channel",
+        description="Create the league roles and optionally set the announcement/seed channels",
     )
-    @app_commands.describe(seed_channel="The seed discussion channel to hide from unsubmitted participants")
+    @app_commands.describe(
+        seed_channel="The seed discussion channel to hide from unsubmitted participants",
+        announce_channel="The channel for season/round start/end announcements",
+    )
     @admin_only()
     async def setup(self, interaction: app_commands.Interaction,
-                    seed_channel: discord.TextChannel | None = None):
+                    seed_channel: discord.TextChannel | None = None,
+                    announce_channel: discord.TextChannel | None = None):
         await interaction.response.defer(ephemeral=True)
         try:
             message = await self.service.setup(interaction.guild, seed_channel)
         except LeagueError as exc:
             message = f"❌ {exc}"
+        if announce_channel is not None:
+            await self.bot.roles.apply_announce_channel(interaction.guild, announce_channel)
+            message += f"\nAnnouncements will be posted in **#{announce_channel.name}**."
         await interaction.followup.send(message)
 
     @league_admin.command(name="create_season", description="Start a new league season")
@@ -228,22 +235,38 @@ class League(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
         spec = state.season
-        # Grant the seed-not-done role to registered participants of an
-        # already-active round (they have not submitted yet).
-        if state.in_season and state.period_index is not None:
-            for member in interaction.guild.members:
-                if isinstance(member, discord.Member) and self.bot.db.is_participant(member.id):
-                    if not self.bot.db.has_submitted(spec.season_id, state.period_index, member.id):
-                        await self.bot.roles.grant_seed_not_done(interaction.guild, member)
+        # Announce sign-ups right away when the season starts in the future;
+        # a season that already started gets its announcements from the
+        # scheduler's catch-up instead.
+        posted = False
+        if now_utc() < spec.start_at:
+            posted = await self.service.announce_signups_open(interaction.guild, state)
+        announce_id = self.bot.roles.get_announce_channel_id()
+        description = (
+            f"**Round length:** {format_duration(spec.period_length)}\n"
+            f"**Number of rounds:** {spec.num_periods}\n"
+            f"**Start:** {discord_timestamp(spec.start_at)}\n"
+            f"**End:** {discord_timestamp(spec.end_at)}\n\n"
+            "Sheet rows were pre-created for all registered participants."
+        )
+        if announce_id:
+            description += (
+                f"\n\n📣 Announcements (season/round start & end, 24h reminder) "
+                f"are posted in <#{announce_id}>."
+            )
+            if not posted and now_utc() < spec.start_at:
+                description += (
+                    "\n⚠️ The sign-ups announcement could NOT be posted there — "
+                    "check the bot log (missing permissions?)."
+                )
+        elif not posted:
+            description += (
+                "\n⚠️ No announcement channel configured — run `/league_admin setup` "
+                "with `announce_channel` so season/round events get announced."
+            )
         embed = discord.Embed(
             title=f"Season {spec.season_id} created",
-            description=(
-                f"**Round length:** {spec.period_length}\n"
-                f"**Number of rounds:** {spec.num_periods}\n"
-                f"**Start:** {discord_timestamp(spec.start_at)}\n"
-                f"**End:** {discord_timestamp(spec.end_at)}\n\n"
-                "Sheet rows were pre-created for all registered participants."
-            ),
+            description=description,
             colour=discord.Colour.green(),
         )
         await interaction.followup.send(embed=embed)
@@ -251,13 +274,7 @@ class League(commands.Cog):
     @league_admin.command(name="season_info", description="Show the current season and active round")
     @admin_only()
     async def season_info(self, interaction: app_commands.Interaction):
-        # Clean up registrations from any ended season before reporting.
-        note = self.service.cleanup_ended_season()
-        if note is not None:
-            await self.bot.roles.strip_league_roles(interaction.guild)
         message = self.service.season_info()
-        if note:
-            message = f"🧹 {note}\n\n{message}"
         await interaction.response.send_message(message)
 
     @league_admin.command(name="add_participant", description="Register a user as a league participant")

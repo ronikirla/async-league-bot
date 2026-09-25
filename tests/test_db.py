@@ -81,3 +81,21 @@ def test_sheet_row_is_stable(db):
     assert db.participant_sheet_row(1) == row_first  # later registrants don't shift rows
     assert db.participant_sheet_row(2) == row_first + 1
     assert row_first == 2  # row 1 is the header
+
+
+def test_dispatched_event_markers(db):
+    assert not db.is_event_dispatched(1, "period_start", 1)
+    assert not db.is_event_dispatched(1, "season_end", None)
+    db.mark_event_dispatched(1, "period_start", 1)
+    db.mark_event_dispatched(1, "season_end", None)
+    db.mark_event_dispatched(2, "period_start", 1)
+    assert db.is_event_dispatched(1, "period_start", 1)
+    assert db.is_event_dispatched(1, "season_end", None)
+    assert db.is_event_dispatched(2, "period_start", 1)
+    # Different round / kind / season are independent.
+    assert not db.is_event_dispatched(1, "period_start", 2)
+    assert not db.is_event_dispatched(1, "period_reminder", 1)
+    assert not db.is_event_dispatched(3, "period_start", 1)
+    # Marking twice is harmless.
+    db.mark_event_dispatched(1, "period_start", 1)
+    assert db.is_event_dispatched(1, "period_start", 1)

@@ -47,7 +47,7 @@ def bot(tmp_path):
     import os
 
     db = Database(os.path.join(tmp_path, "t.db"))
-    cfg = Config("x", 1, (1,), "x", "x", "P", "S", True, 15)
+    cfg = Config("x", 1, (1,), "x", "x", "P", "S", True)
     roles = RoleManager(cfg, db)
     sheets = SheetService(cfg, db)
     svc = LeagueService(cfg, db, roles, sheets)

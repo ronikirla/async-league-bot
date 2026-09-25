@@ -26,6 +26,7 @@ from periods import (
     parse_start_time,
 )
 from roles import RoleManager
+from scheduler import ScheduledEvent, Scheduler
 from sheets import SheetsError, SheetService
 from util import discord_timestamp, format_duration, iso_utc, is_http_url, now_utc
 
@@ -56,12 +57,13 @@ class LeagueService:
         self.db = db
         self.roles = roles
         self.sheets = sheets
+        self.scheduler = Scheduler(db)
 
     # -- helpers ---------------------------------------------------------
     def require_state(self, now: datetime | None = None) -> SeasonState:
         state = current_season_state(self.db, now or now_utc())
         if state is None:
-            raise LeagueError("No season has been created yet. An admin needs to run `/league create_season` first.")
+            raise LeagueError("No season has been created yet.")
         return state
 
     def require_active(self, now: datetime | None = None) -> tuple[SeasonState, int]:
@@ -80,6 +82,122 @@ class LeagueService:
 
     def _spec(self, state: SeasonState) -> SeasonSpec:
         return state.season
+
+    # -- scheduled events (announcements + role changes) -------------------
+    async def on_scheduled_event(self, guild: discord.Guild, event: ScheduledEvent) -> bool:
+        """Handle one scheduler event: post the announcement and do the
+        role changes that belong to that moment.
+
+        Past events are replayed by the scheduler at boot, so a restart
+        never skips an announcement or a role change.
+        """
+        row = self.db.get_latest_season()
+        if row is None or int(row["id"]) != event.season_id:
+            return  # a newer season replaced this one; ignore stale events
+        spec = SeasonSpec(
+            season_id=int(row["id"]),
+            start_at=datetime.fromisoformat(row["start_at_utc"]),
+            period_length=timedelta(seconds=int(row["period_length_seconds"])),
+            num_periods=int(row["num_periods"]),
+        )
+
+        if event.kind == "period_start":
+            index = event.period_index
+            assert index is not None
+            await self.roles.on_round_start(guild, spec, index)
+            # Round 1's start doubles as the season-start announcement.
+            tail = (
+                "\nRegistration is closed while the season runs."
+                if index == 1
+                else ""
+            )
+            return await self.roles.announce(
+                guild,
+                f"🟢 **Season {spec.season_id}, Round "
+                f"{index}/{spec.num_periods} has started!**\n"
+                f"Ends: {discord_timestamp(spec.period_end(index))}\n"
+                f"Use `/league seed` to get the seed and `/league submit` "
+                f"when you are done."
+                + tail,
+            )
+
+        elif event.kind == "period_reminder":
+            index = event.period_index
+            assert index is not None
+            not_done = self.db.unsubmitted_ids(spec.season_id, index)
+            if not_done:
+                # Ping the seed-not-done role: its holders are exactly the
+                # participants who have not reported this round yet.
+                role = await self.roles.seed_not_done_role(guild)
+                return await self.roles.announce(
+                    guild,
+                    f"⏰ {role.mention} **24 hours left in Season "
+                    f"{spec.season_id}, round {index}/{spec.num_periods}!**\n"
+                    f"Ends: {discord_timestamp(spec.period_end(index))}\n"
+                    "Submit with `/league submit`, or `/league dnf` if you "
+                    "can't finish.",
+                )
+            else:
+                return await self.roles.announce(
+                    guild,
+                    f"🎉 Everyone has reported for Season {spec.season_id} "
+                    f"round {index}/{spec.num_periods}, which ends "
+                    f"{discord_timestamp(spec.period_end(index))}.",
+                )
+
+        elif event.kind == "season_end":
+            await self.roles.on_round_end(guild, spec, spec.num_periods)
+            count = self.db.clear_participants()
+            log.info("Season %d ended: cleared %d registration(s)", spec.season_id, count)
+            return await self.roles.announce(
+                guild,
+                f"🏆 **Season {spec.season_id} has ended!**\n"
+            )
+
+        return False  # unknown event kind (unreachable with current kinds)
+
+    def start_scheduler(self, get_guild) -> None:
+        """Arm all timers for the latest season and replay missed events.
+
+        ``get_guild`` is called for every event so the guild is resolved
+        fresh (it may not be cached the instant the bot boots).
+
+        Fully handled events are recorded in the database, and catch-up
+        skips events already recorded — so a restart replays only what was
+        truly missed, never an announcement that was already posted.
+        """
+
+        async def dispatch(event: ScheduledEvent) -> None:
+            guild = get_guild()
+            if guild is None:
+                log.warning("Guild not available; skipping %s event", event.kind)
+                return
+            if self.db.is_event_dispatched(
+                event.season_id, event.kind, event.period_index
+            ):
+                log.info(
+                    "Skipping %s event for season %s round %s (already dispatched)",
+                    event.kind, event.season_id, event.period_index,
+                )
+                return
+            handled = await self.on_scheduled_event(guild, event)
+            if handled:
+                self.db.mark_event_dispatched(
+                    event.season_id, event.kind, event.period_index
+                )
+
+        self.scheduler.start(dispatch)
+
+    def reschedule(self) -> None:
+        """Recompute timers after a season is created.
+
+        Never raises: the season is already committed at this point, so a
+        failure to arm the timers is logged but must not fail the command.
+        """
+        try:
+            self.scheduler.reschedule()
+        except Exception:
+            log.exception("Failed to re-arm season timers")
 
     def _ensure_records(self, season: SeasonSpec, discord_id: int) -> None:
         """Create DB period records for a participant (idempotent)."""
@@ -129,6 +247,9 @@ class LeagueService:
 
         state = current_season_state(self.db)
         assert state is not None and state.season.season_id == season_id
+        # Arm the exact timers for this season (replacing any previous ones)
+        # before any optional follow-up work that could fail.
+        self.reschedule()
         # Pre-create one DB record per (participant, period).
         for p in self.db.list_participants():
             self._ensure_records(state.season, int(p["discord_id"]))
@@ -139,22 +260,23 @@ class LeagueService:
             raise LeagueError(f"Season created, but the Google sheet could not be updated: {exc}") from exc
         return state
 
-    def cleanup_ended_season(self) -> str | None:
-        """Remove all registrations once a season has ended.
+    async def announce_signups_open(self, guild: discord.Guild, state: SeasonState) -> bool:
+        """Post the sign-ups announcement right after creating a season whose
+        first round has not started yet.
 
-        Returns a human-readable note if a cleanup happened, else ``None``.
+        Returns True when the announcement was posted. A season that starts
+        in the past does not get this message — its season-start
+        announcement is replayed by the scheduler's catch-up instead.
         """
-        row = self.db.get_latest_season()
-        if row is None:
-            return None
-        ended_at = datetime.fromisoformat(row["start_at_utc"]) + timedelta(
-            seconds=int(row["period_length_seconds"]) * int(row["num_periods"])
+        spec = state.season
+        return await self.roles.announce(
+            guild,
+            f"📣 **Sign-ups are open for Season {spec.season_id}!**\n"
+            f"Round length: {format_duration(spec.period_length)} · "
+            f"Rounds: {spec.num_periods}\n"
+            f"Season starts: {discord_timestamp(spec.start_at)}\n"
+            "Register with `/league register` before it begins!",
         )
-        if ended_at <= now_utc() and self.db.is_any_participant():
-            count = self.db.clear_participants()
-            log.info("Season %s ended: cleared %d registrations", row["id"], count)
-            return f"Season {row['id']} has ended — cleared {count} registration(s)."
-        return None
 
     def season_info(self) -> str:
         state = current_season_state(self.db)
@@ -164,7 +286,7 @@ class LeagueService:
         now = now_utc()
         lines = [
             f"**Season {spec.season_id}**",
-            f"Round length: `{spec.period_length}`",
+            f"Round length: `{format_duration(spec.period_length)}`",
             f"Rounds: {spec.num_periods}",
             f"Season start: {discord_timestamp(spec.start_at)}",
             f"Season end: {discord_timestamp(spec.end_at)}",
