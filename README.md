@@ -72,8 +72,9 @@ A Discord bot for running an asynchronous speedrun league:
    The run time is stored as a **number** (seconds, millisecond precision)
    so the column can be sorted and used for averages. A round the runner did
    not finish is stored as the text `DNF` in the same column.
-   Rows are pre-created for every registered participant; cells are updated
-   in place and never clobbered. All timestamps are UTC ISO 8601.
+   Rows are pre-created for every registered participant (rows for
+   mid-season registrations are appended when they register); cells are
+   updated in place and never clobbered. All timestamps are UTC ISO 8601.
 
 ### 3. Configure & run
 
@@ -121,14 +122,14 @@ Two groups:
 | `/league_admin create_season round_length rounds start` | Start a new season. `round_length` like `7d`, `12h`, `1d12h`; `start` is ISO 8601 (UTC if no zone) or `now`. Pre-creates sheet rows for all registered participants and arms every announcement timer |
 | `/league_admin season_info` | Season details, active round, current seed, registered count |
 | `/league_admin add_participant user` | Manually register a user (works even during an active round) |
-| `/league_admin remove_participant user` | Remove a user from the league (roles revoked) |
+| `/league_admin remove_participant user` | Remove a user from the league, even mid-season (roles revoked) |
 
 ### Participants
 
 | Command | Description |
 |---|---|
-| `/league register` | Join the league. Only allowed while no round is active (before the season starts, or after it ends). Grants the participant role |
-| `/league unregister` | Leave the league. Same timing restriction as registration |
+| `/league register` | Join the league — before a season starts, or **late, while it runs** (a late entry plays the remaining rounds, including the current one). Grants the participant role |
+| `/league unregister` | Leave the league. Only allowed while no season is running — unregistering is locked mid-season |
 | `/league seed` | Request the current round's seed (ephemeral reply). One seed per round for everyone; the sheet records only the **first** request time |
 | `/league submit time video` | Submit your run. `time` = `M:SS` or `H:MM:SS` with optional `.mmm`; `video` = http(s) link. Submissions are final per round |
 | `/league dnf` | Mark the round as **DNF** (did not finish) — writes the text `DNF` into the run-time cell of the sheet. Final per round, mutually exclusive with `/league submit` |
@@ -158,9 +159,14 @@ Two groups:
 - **Seeds:** a single seed per round for the whole league, random in
   `0–9999999999` (inclusive), generated on the first `/league seed` of the round.
   Repeated requests return the same seed without updating the sheet.
-- **Registration lifecycle:** participants register before a season starts
-  (or after one ends). When a season ends, **all registrations are cleared**
-  automatically (by the season-end event) and both league roles are revoked.
+- **Registration lifecycle:** participants can register before a season
+  starts or **late, while it runs** — a late entry immediately plays the
+  current and remaining rounds (their sheet rows are appended at the bottom,
+  and the round's shared seed is back-filled into their row on their first
+  `/league seed`). **Unregistering is locked while a season runs** and
+  re-opens once it ends. When a season ends, **all registrations are
+  cleared** automatically (by the season-end event) and both league roles
+  are revoked.
 - **Sheet writes are idempotent:** a cell is only filled when empty, and row
   pre-creation merges with existing values, so re-runs or stale reads can
   never overwrite a seed, timestamp, or submission. If a write to the sheet

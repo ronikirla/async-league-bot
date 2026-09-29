@@ -64,12 +64,6 @@ def test_full_period_flow(service, tmp_path):
     assert state.in_season
     assert state.period_index == 1
 
-    # Registration closes once a period is active.
-    with pytest.raises(LeagueError) as exc:
-        svc.register(FakeMember(4, "late"))
-    assert "closed" in str(exc.value).lower()
-    assert not db.is_participant(4)
-
     # Non-participant cannot request the seed.
     with pytest.raises(LeagueError):
         svc.request_seed(FakeMember(4))
@@ -85,6 +79,22 @@ def test_full_period_flow(service, tmp_path):
     # Beta requests the same period seed.
     r3 = svc.request_seed(FakeMember(3))
     assert r3.seed == r1.seed
+
+    # Late registration is allowed mid-season, even after the round's seed
+    # was already generated: the newcomer plays the remaining rounds.
+    msg = svc.register(FakeMember(4, "late"))
+    assert "Registered" in msg
+    assert "remaining" in msg
+    assert db.is_participant(4)
+
+    # The late entrant gets the same shared seed and can play this round;
+    # their sheet row gets the seed back-filled.
+    r4 = svc.request_seed(FakeMember(4))
+    assert r4.seed == r1.seed
+    assert r4.first_request is True
+    late = svc.submit(FakeMember(4), "11:11.111", "https://youtu.be/late")
+    assert late.run_time == "11:11.111"
+    assert db.has_submitted(state.season.season_id, 1, 4)
 
     # Submission validation.
     with pytest.raises(LeagueError):
@@ -116,18 +126,26 @@ def test_full_period_flow(service, tmp_path):
     assert "Active round: **1/3**" in info
     assert r1.seed in info
 
-    # Dry-run log captured the sheet writes.
+    # Dry-run log captured the sheet writes, including the seed back-fill
+    # into the late registrant's row.
+    import json
     import os
     assert os.path.exists(DRY_RUN_LOG_FILE)
+    with open(DRY_RUN_LOG_FILE, encoding="utf-8") as fh:
+        ops = [json.loads(line) for line in fh if line.strip()]
+    assert any(
+        op["op"] == "write_seed_for_participant" and op["discord_id"] == 4
+        for op in ops
+    )
 
 
 def test_dnf_flow(service, tmp_path):
     """A runner who did not finish can mark the round DNF."""
     svc, db = service
     now = datetime.now(timezone.utc)
-    # Registration is closed during an active round, so use the admin path.
+    # Late registration works mid-season.
     state = svc.create_season("7d", 3, (now - timedelta(days=1)).isoformat())
-    svc.add_participant(FakeMember(5, "dnfer"))
+    svc.register(FakeMember(5, "dnfer"))
 
     result = svc.dnf(FakeMember(5))
     assert result.run_time == "DNF"
@@ -140,11 +158,11 @@ def test_dnf_flow(service, tmp_path):
         svc.dnf(FakeMember(5))
 
     # A submitted runner cannot DNF, and a DNF'd runner cannot submit.
-    svc.add_participant(FakeMember(6, "submitter"))
+    svc.register(FakeMember(6, "submitter"))
     svc.submit(FakeMember(6), "10:00.000", "https://youtu.be/x")
     with pytest.raises(LeagueError):
         svc.dnf(FakeMember(6))
-    svc.add_participant(FakeMember(7, "dnfer2"))
+    svc.register(FakeMember(7, "dnfer2"))
     svc.dnf(FakeMember(7))
     with pytest.raises(LeagueError):
         svc.submit(FakeMember(7), "10:00.000", "https://youtu.be/x")
@@ -218,7 +236,7 @@ def test_boot_catchup_posts_missed_announcements(service):
     # 10 days into a 14-day season: rounds 1 start/end and round 2 start
     # should have happened already.
     svc.create_season("7d", 2, (now - timedelta(days=10)).isoformat())
-    # Registration is closed mid-season, so add the participants directly.
+    # Add the participants directly (registering mid-season would work too).
     db.add_participant(21, "alpha")
     db.add_participant(22, "beta")
 
@@ -266,7 +284,6 @@ def test_boot_catchup_posts_missed_announcements(service):
     text = "\n".join(channel.sent)
     # Round 1's start doubles as the season-start announcement.
     assert "Season 1, Round 1/2 has started" in text
-    assert "Registration is closed while the season runs." in text
     assert "Season 1, Round 2/2 has started" in text
     # The 24h reminder for round 1 pinged the seed-not-done role.
     assert "24 hours left" in text
@@ -368,7 +385,6 @@ def test_signups_announced_now_and_season_start_on_timer(service):
     assert "Sign-ups are open for Season 1" in text
     # Round 1's start doubles as the season-start announcement.
     assert "Season 1, Round 1/1 has started" in text
-    assert "Registration is closed while the season runs." in text
     assert "has ended" not in text  # the season end is still 7d out
 
 
@@ -482,7 +498,7 @@ def test_failed_announcements_retry_on_next_boot(service):
     assert db.is_event_dispatched(1, "period_start", 1)
 
 
-def test_registration_closed_during_active_period(service):
+def test_late_registration_open_unregister_locked(service):
     svc, db = service
     now = datetime.now(timezone.utc)
     # Register before the season starts.
@@ -492,7 +508,13 @@ def test_registration_closed_during_active_period(service):
     # Now an active season exists.
     past_start = (now - timedelta(days=1)).isoformat()
     svc.create_season("7d", 1, past_start)
-    with pytest.raises(LeagueError):
+    # Unregistering is blocked while the season runs...
+    with pytest.raises(LeagueError) as exc:
         svc.unregister(FakeMember(10))
+    assert "cannot unregister" in str(exc.value).lower()
+    assert db.is_participant(10)
+    # ...but registering late still works.
+    assert "Registered" in svc.register(FakeMember(11, "late"))
+    assert db.is_participant(11)
     # ...and admin add is unaffected (no registration gate).
     assert db.is_participant(10)

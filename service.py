@@ -105,12 +105,6 @@ class LeagueService:
             index = event.period_index
             assert index is not None
             await self.roles.on_round_start(guild, spec, index)
-            # Round 1's start doubles as the season-start announcement.
-            tail = (
-                "\nRegistration is closed while the season runs."
-                if index == 1
-                else ""
-            )
             return await self.roles.announce(
                 guild,
                 f"🟢 **Season {spec.season_id}, Round "
@@ -118,7 +112,6 @@ class LeagueService:
                 f"Ends: {discord_timestamp(spec.period_end(index))}\n"
                 f"Use `/league seed` to get the seed and `/league submit` "
                 f"when you are done."
-                + tail,
             )
 
         elif event.kind == "period_reminder":
@@ -275,7 +268,7 @@ class LeagueService:
             f"Round length: {format_duration(spec.period_length)} · "
             f"Rounds: {spec.num_periods}\n"
             f"Season starts: {discord_timestamp(spec.start_at)}\n"
-            "Register with `/league register` before it begins!",
+            "Register with `/league register`!",
         )
 
     def season_info(self) -> str:
@@ -330,18 +323,23 @@ class LeagueService:
         return f"Removed <@{user.id}> from the league."
 
     # -- registration rules ----------------------------------------------------
-    def registration_open(self) -> None:
-        """Registration and unregistration are only allowed while no round is active."""
+    def unregistration_open(self) -> None:
+        """Unregistering is only allowed while no season is running.
+
+        Registering, in contrast, is always allowed: a late entry plays the
+        remaining rounds of the running season (see :meth:`register`).
+        """
         state = current_season_state(self.db)
         if state is not None and state.in_season:
             raise LeagueError(
-                "Registration is closed while the season is in progress. "
-                "It re-opens once the season ends."
+                "You cannot unregister while a season is in progress. "
+                "You can leave once the season ends."
             )
 
     # -- participant actions -------------------------------------------------
     def register(self, member: discord.Member) -> str:
-        self.registration_open()
+        """Register the member. Allowed at any time — before a season starts
+        or late, while it runs (a late entry plays the remaining rounds)."""
         if self.db.is_participant(member.id):
             return f"Welcome back, {member.mention}! You are already registered."
         name = member.global_name or member.name
@@ -353,12 +351,21 @@ class LeagueService:
                 self.sheets.ensure_season_rows(state.season)
             except SheetsError as exc:
                 return f"Registered, but the sheet update failed: {exc}"
+            if state.in_season and state.period_index is not None:
+                spec = state.season
+                return (
+                    f"Registered {member.mention} as a league participant. "
+                    f"The season is already running — you can play the "
+                    f"remaining rounds (round {state.period_index}/"
+                    f"{spec.num_periods} is in progress). Use `/league seed` "
+                    f"and `/league submit`."
+                )
         return f"Registered {member.mention} as a league participant. You can now use `/league seed` and `/league submit`."
 
     def unregister(self, member: discord.Member) -> str:
-        self.registration_open()
         if not self.db.is_participant(member.id):
             return f"You are not registered, so there is nothing to do."
+        self.unregistration_open()
         state = current_season_state(self.db)
         if state is not None:
             self.db.delete_records_for(state.season.season_id, member.id)
@@ -375,6 +382,7 @@ class LeagueService:
 
         # One shared seed per period for the whole league.
         seed = self.db.get_period_seed(spec.season_id, period_index)
+        record = self.db.record_exists(spec.season_id, period_index, member.id)
         if seed is None:
             seed = str(secrets.randbelow(MAX_SEED))
             self.db.set_record_seed(spec.season_id, period_index, seed)
@@ -386,16 +394,24 @@ class LeagueService:
                     f"but writing it to the sheet failed: {exc}"
                 ) from exc
             log.info("Generated seed %s for season %s period %d", seed, spec.season_id, period_index)
-        else:
-            # Mid-period registration: make sure this participant's row has the seed too.
+        elif record is None or record["seed"] is None:
+            # Mid-season registration: back-fill the shared seed into this
+            # participant's row (DB + sheet) — it was created empty when
+            # they registered, after the seed already existed.
             self.db.set_record_seed(spec.season_id, period_index, seed)
+            try:
+                self.sheets.write_seed_for_participant(spec, period_index, member.id, seed)
+            except SheetsError as exc:
+                raise LeagueError(
+                    f"Seed {seed} was recorded locally, "
+                    f"but writing it to the sheet failed: {exc}"
+                ) from exc
 
         first_request = self.db.mark_seed_requested(spec.season_id, period_index, member.id)
 
         # Keep the sheet in sync with the DB-stored first-request timestamp.
         # The sheet cell is only ever filled when empty, so this is idempotent
         # and self-heals if a previous write was lost.
-        record = self.db.record_exists(spec.season_id, period_index, member.id)
         stored_at = record["seed_requested_at_utc"] if record else None
         if stored_at:
             try:

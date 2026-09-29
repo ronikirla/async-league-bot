@@ -282,6 +282,29 @@ class SheetService:
         log.info("Wrote seed %s to %d rows (season %s, period %d)", seed, len(updates),
                  season.season_id, period_index)
 
+    def write_seed_for_participant(
+        self, season: SeasonSpec, period_index: int, discord_id: int, seed: str
+    ) -> None:
+        """Write the shared seed into ONE participant's row.
+
+        Used when a participant registered after the round's seed was
+        generated: their row was appended later and its seed cell is still
+        empty. Never overwrites an existing value.
+        """
+        self.ensure_season_rows(season)
+        ws = self.get_or_create_season_tab(season.season_id)
+        if ws is None:
+            self._dry_log("write_seed_for_participant", season_id=season.season_id,
+                          period=period_index, discord_id=discord_id, seed=seed)
+            return
+        row = self._target_row(season, period_index, discord_id)
+        cell_ref = f"{_col_letter(COL_SEED)}{row}"
+        if ws.acell(cell_ref).value:
+            return  # never overwrite an existing seed
+        ws.update_acell(cell_ref, seed)
+        log.info("Back-filled seed %s for discord id %d (season %s, period %d)",
+                 seed, discord_id, season.season_id, period_index)
+
     def write_seed_requested(
         self, season: SeasonSpec, period_index: int, discord_id: int, at: datetime
     ) -> None:

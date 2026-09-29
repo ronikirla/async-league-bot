@@ -74,7 +74,10 @@ class League(commands.Cog):
 
     # -- participants (visible to everyone) --------------------------------
 
-    @league.command(name="register", description="Register as a league participant")
+    @league.command(
+        name="register",
+        description="Register as a league participant (late entries welcome mid-season)",
+    )
     async def register(self, interaction: app_commands.Interaction):
         # Deferring keeps us within Discord's 3-second window when sheet
         # pre-creation happens in the same call.
@@ -109,11 +112,13 @@ class League(commands.Cog):
         try:
             message = await asyncio.to_thread(self.service.unregister, interaction.user)
         except LeagueError as exc:
-            message = f"❌ {exc}"
-        # Always make sure the league roles are gone (even if the DB entry
-        # was already cleared, e.g. by the season-end cleanup).
+            # Blocked mid-season (or anything else): keep roles untouched.
+            await interaction.followup.send(f"❌ {exc}")
+            return
+        # Unregister succeeded: make sure the league roles are gone (even if
+        # the DB entry was already cleared, e.g. by the season-end cleanup).
         await self.bot.roles.revoke_participant(interaction.guild, interaction.user)
-        if not was_registered and "closed" not in message.lower():
+        if not was_registered:
             message = f"League roles removed. (You were not registered: {message})"
         await interaction.followup.send(message)
 
