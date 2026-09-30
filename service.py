@@ -139,7 +139,9 @@ class LeagueService:
                 )
 
         elif event.kind == "season_end":
-            await self.roles.on_round_end(guild, spec, spec.num_periods)
+            # Season over: strip BOTH league roles (participant +
+            # seed-not-done) from everyone, then clear the registrations.
+            await self.roles.strip_league_roles(guild)
             count = self.db.clear_participants()
             log.info("Season %d ended: cleared %d registration(s)", spec.season_id, count)
             return await self.roles.announce(
@@ -410,8 +412,12 @@ class LeagueService:
         first_request = self.db.mark_seed_requested(spec.season_id, period_index, member.id)
 
         # Keep the sheet in sync with the DB-stored first-request timestamp.
-        # The sheet cell is only ever filled when empty, so this is idempotent
-        # and self-heals if a previous write was lost.
+        # Re-read the record: the snapshot taken above predates the UPDATE,
+        # so right after a first request it still shows no timestamp and the
+        # sheet cell would never be filled. The sheet cell is only ever
+        # filled when empty, so this stays idempotent and self-heals if a
+        # previous write was lost.
+        record = self.db.record_exists(spec.season_id, period_index, member.id)
         stored_at = record["seed_requested_at_utc"] if record else None
         if stored_at:
             try:

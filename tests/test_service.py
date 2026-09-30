@@ -19,6 +19,36 @@ class FakeMember:
         self.name = name
         self.mention = f"<@{user_id}>"
 
+class FakeRole:
+    def __init__(self, name: str):
+        self.name = name
+
+
+class SeasonEndMember(discord.Member):
+    """Minimal discord.Member stand-in for the season-end role strip.
+
+    ``id`` and ``roles`` are read-only properties on the real class, so they
+    are shadowed with properties backed by private attributes.
+    """
+
+    def __init__(self, user_id: int, roles: list):
+        self._id = user_id
+        self._roles = list(roles)
+        self.removed = []
+
+    @property
+    def id(self):
+        return self._id
+
+    @property
+    def roles(self):
+        return self._roles
+
+    async def remove_roles(self, *roles, reason=None):
+        self.removed.extend(roles)
+        for role in roles:
+            if role in self._roles:
+                self._roles.remove(role)
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
@@ -139,6 +169,33 @@ def test_full_period_flow(service, tmp_path):
     )
 
 
+def test_seed_requested_timestamp_written_on_first_request(service):
+    """The FIRST /league seed call must log the request timestamp to the sheet.
+
+    Regression: the service used a record snapshot taken before the DB
+    update, so the timestamp was only written on a second seed request
+    (and never for one-shot requesters).
+    """
+    svc, db = service
+    now = datetime.now(timezone.utc)
+    state = svc.create_season("7d", 2, (now - timedelta(days=1)).isoformat())
+    svc.register(FakeMember(8, "once"))
+
+    result = svc.request_seed(FakeMember(8))
+    assert result.first_request is True
+
+    import json
+    with open(DRY_RUN_LOG_FILE, encoding="utf-8") as fh:
+        ops = [json.loads(line) for line in fh if line.strip()]
+    writes = [
+        op for op in ops
+        if op["op"] == "write_seed_requested" and op["discord_id"] == 8
+    ]
+    assert writes, "first seed request must write the requested-at timestamp"
+    rec = db.record_exists(state.season.season_id, 1, 8)
+    assert writes[0]["at"] == rec["seed_requested_at_utc"]
+
+
 def test_dnf_flow(service, tmp_path):
     """A runner who did not finish can mark the round DNF."""
     svc, db = service
@@ -212,10 +269,16 @@ def test_season_end_event_clears_registrations(service):
     svc.register(FakeMember(9))
     assert db.is_any_participant()
 
+    # The participant holds both league roles; season end must strip them.
+    member = SeasonEndMember(9, [
+        FakeRole("League Participant"),
+        FakeRole("League Seed Not Done"),
+    ])
+
     from scheduler import ScheduledEvent
 
     async def run():
-        guild = type("G", (), {"roles": [], "members": []})()
+        guild = type("G", (), {"roles": [], "members": [member]})()
         await svc.on_scheduled_event(
             guild, ScheduledEvent("season_end", now, None, state.season.season_id)
         )
@@ -223,9 +286,12 @@ def test_season_end_event_clears_registrations(service):
     asyncio.run(run())
 
     assert not db.is_any_participant()
+    assert len(member.removed) == 2  # participant + seed-not-done roles gone
+
     # Idempotent: replaying the event clears nothing (and does not crash).
     asyncio.run(run())
     assert not db.is_any_participant()
+    assert len(member.removed) == 2
 
 
 def test_boot_catchup_posts_missed_announcements(service):

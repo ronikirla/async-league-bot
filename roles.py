@@ -2,11 +2,14 @@
 
 Three roles:
 - **participant role** (e.g. ``League Participant``): gates ``/league seed`` and
-  ``/league submit``. Granted on registration, removed on ``/league_admin remove_participant``.
+  ``/league submit``. Granted on registration, removed on unregister /
+  ``/league_admin remove_participant``, and stripped from everyone when the
+  season ends.
 - **seed-not-done role** (e.g. ``League Seed Not Done``): granted while a
   registered participant has NOT submitted the active round. Granted at round
-  start (inline with the round-start announcement) and removed on submission
-  or when the round ends — there is no background reconciliation.
+  start (inline with the round-start announcement), removed on submission,
+  re-synced at every round start, and stripped from everyone when the season
+  ends — there is no background reconciliation.
 - **admin role** (``League Admin``): created by the bot at startup with the
   Administrator permission so that the ``/league_admin`` command group is
   only visible to the league's admins.
@@ -148,8 +151,9 @@ class RoleManager:
 
     # -- round-boundary role routines -----------------------------------
     # These are attached to the announcement routines in service.py so that
-    # role changes happen exactly when the round starts/ends - no timers of
-    # their own and no periodic reconciliation.
+    # role changes happen exactly when the round starts - no timers of their
+    # own and no periodic reconciliation. (Season end strips both league
+    # roles via strip_league_roles.)
 
     async def on_round_start(self, guild: Guild, spec: SeasonSpec, period_index: int) -> None:
         """Sync the seed-not-done role for the round that just started.
@@ -178,19 +182,6 @@ class RoleManager:
                 changed += 1
         if changed:
             log.info("Round start: adjusted seed-not-done role for %d member(s)", changed)
-
-    async def on_round_end(self, guild: Guild, spec: SeasonSpec, period_index: int) -> None:
-        """Revoke the seed-not-done role from everyone at round end.
-
-        The round is over, so nobody is "not done" anymore. Runs inline with
-        the round-end announcement.
-        """
-        role = self._find_role(guild, self._config.seed_not_done_role_name)
-        if role is None:
-            return
-        for member in guild.members:
-            if isinstance(member, Member) and role in member.roles:
-                await member.remove_roles(role, reason="Round ended")
 
     # -- announcements ---------------------------------------------------
     async def announce_channel(self, guild: Guild) -> Optional[discord.TextChannel]:

@@ -37,14 +37,15 @@ class FakeMember(discord.Member):
     def roles(self):
         return self._roles
 
-    async def add_roles(self, role, reason=None):
-        self.added.append(role)
-        self._roles.append(role)
+    async def add_roles(self, *roles, reason=None):
+        self.added.extend(roles)
+        self._roles.extend(roles)
 
-    async def remove_roles(self, role, reason=None):
-        self.removed.append(role)
-        if role in self._roles:
-            self._roles.remove(role)
+    async def remove_roles(self, *roles, reason=None):
+        self.removed.extend(roles)
+        for role in roles:
+            if role in self._roles:
+                self._roles.remove(role)
 
     def __eq__(self, other):
         return isinstance(other, FakeMember) and self._mid == other._mid
@@ -96,26 +97,36 @@ def test_round_start_grants_role_to_unsubmitted(env):
     assert not_done_role in member2.removed
 
 
-def test_round_end_strips_role_from_everyone(env):
-    """Round end revokes the seed-not-done role from all members."""
+def test_season_end_strips_league_roles(env):
+    """Season end removes BOTH league roles from every holder (idempotent)."""
     import asyncio
 
     db, rm = env
+    participant_role = FakeRole("P")
     not_done_role = FakeRole("S")
-    member1 = FakeMember(1, [not_done_role])
-    member2 = FakeMember(2, [])
-    guild = FakeGuild(members=[member1, member2], roles=[FakeRole("P"), not_done_role])
+    member1 = FakeMember(1, [participant_role, not_done_role])
+    member2 = FakeMember(2, [participant_role])
+    member3 = FakeMember(3, [FakeRole("Unrelated")])
+    guild = FakeGuild(
+        members=[member1, member2, member3],
+        roles=[participant_role, not_done_role, FakeRole("Unrelated")],
+    )
 
-    spec = SeasonSpec(season_id=1, start_at=datetime.now(timezone.utc),
-                      period_length=timedelta(days=7), num_periods=1)
-    asyncio.run(rm.on_round_end(guild, spec, 1))
+    asyncio.run(rm.strip_league_roles(guild))
 
+    assert participant_role in member1.removed
     assert not_done_role in member1.removed
-    assert not member2.added
+    assert participant_role in member2.removed
+    assert not member3.removed
+    # Idempotent: a second pass removes nothing new.
+    asyncio.run(rm.strip_league_roles(guild))
+    assert member1.removed.count(participant_role) == 1
+    assert member1.removed.count(not_done_role) == 1
 
 
-def test_round_routines_are_noops_without_setup(env):
-    """The round routines do nothing when /setup has not created the role."""
+def test_round_start_is_noop_without_setup(env):
+    """Round start (and the season-end strip) do nothing when /setup has not
+    created the roles."""
     import asyncio
 
     db, rm = env
@@ -125,7 +136,8 @@ def test_round_routines_are_noops_without_setup(env):
                       period_length=timedelta(days=7), num_periods=1)
 
     asyncio.run(rm.on_round_start(guild, spec, 1))
-    asyncio.run(rm.on_round_end(guild, spec, 1))
+    # Season-end strip is also a no-op when the roles do not exist.
+    asyncio.run(rm.strip_league_roles(guild))
 
     assert not member1.added
     assert not member1.removed
