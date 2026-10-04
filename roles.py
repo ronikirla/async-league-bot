@@ -68,14 +68,19 @@ class RoleManager:
         role = self._find_role(guild, name)
         if role is None:
             log.info("Creating role %r", name)
-            role = await guild.create_role(
-                name=name,
-                colour=discord.Colour.default(),
-                hoist=False,
-                mentionable=True,
-                permissions=permissions,
-                reason="Created by async league bot",
-            )
+            # discord.py's create_role uses MISSING (not None) as its
+            # "not specified" sentinel; passing None crashes on
+            # ``permissions.value``. Only pass it when set.
+            kwargs: dict[str, object] = {
+                "name": name,
+                "colour": discord.Colour.default(),
+                "hoist": False,
+                "mentionable": True,
+                "reason": "Created by async league bot",
+            }
+            if permissions is not None:
+                kwargs["permissions"] = permissions
+            role = await guild.create_role(**kwargs)  # type: ignore[arg-type]
         self._db.set_setting(settings_key, str(role.id))
         return role
 
