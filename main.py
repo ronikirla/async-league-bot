@@ -37,6 +37,7 @@ class LeagueBot(commands.Bot):
         self.roles = roles
         self.sheets = sheets
         self.service = service
+        self._sheet_healed = False
 
     async def on_message(self, message: discord.Message) -> None:
         # This bot is slash-command-only; the message-command pipeline is
@@ -66,6 +67,16 @@ class LeagueBot(commands.Bot):
         # Restore the exact event timers and run any season/round events that
         # should have already happened while the bot was offline.
         self.service.start_scheduler(lambda: self.get_guild(self.config.guild_id))
+        # Self-heal the season sheet once per run: re-run the row
+        # pre-creation so mislabeled or missing rows are repaired without
+        # waiting for the next registration. Google calls are blocking, so
+        # run them off the event loop.
+        if not self._sheet_healed:
+            self._sheet_healed = True
+            try:
+                await asyncio.to_thread(self.service.ensure_season_sheet)
+            except Exception:
+                log.exception("Season sheet self-heal failed at startup")
 
 
 async def run() -> None:

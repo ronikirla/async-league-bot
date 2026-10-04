@@ -199,7 +199,15 @@ class Database:
         return rows[0] if rows else None
 
     def list_participants(self) -> list[sqlite3.Row]:
-        return self.query("SELECT * FROM participants ORDER BY discord_id")
+        """All participants in registration order (ties broken by discord_id).
+
+        This is the canonical ordering for the spreadsheet layout: one
+        block of rows per participant, later registrants appended at the
+        bottom, so existing rows never shift when someone registers.
+        """
+        return self.query(
+            "SELECT * FROM participants ORDER BY registered_at_utc, discord_id"
+        )
 
     # -- period records ---------------------------------------------------
     def record_exists(
@@ -330,20 +338,3 @@ class Database:
     # Backwards-compatible alias (a DNF also counts as "done").
     def submitted_ids(self, season_id: int, period_index: int) -> set[int]:
         return self.done_ids(season_id, period_index)
-
-    def participant_sheet_row(self, discord_id: int) -> Optional[int]:
-        """Deterministic 1-based spreadsheet row for a participant.
-
-        Rows are ordered by registration order (ties broken by discord_id),
-        with row 1 reserved for the header. Later registrants are always
-        appended after existing rows, so the mapping is stable.
-        """
-        row = self.get_participant(discord_id)
-        if not row:
-            return None
-        rows = self.query(
-            "SELECT COUNT(*) AS c FROM participants "
-            "WHERE (registered_at_utc, discord_id) < (?, ?)",
-            (row["registered_at_utc"], discord_id),
-        )
-        return int(rows[0]["c"]) + 2

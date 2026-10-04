@@ -74,13 +74,29 @@ def test_settings(db):
     assert db.get_setting("k") == "v2"
 
 
-def test_sheet_row_is_stable(db):
-    db.add_participant(1, "first")
-    row_first = db.participant_sheet_row(1)
-    db.add_participant(2, "second")
-    assert db.participant_sheet_row(1) == row_first  # later registrants don't shift rows
-    assert db.participant_sheet_row(2) == row_first + 1
-    assert row_first == 2  # row 1 is the header
+def test_list_participants_registration_order(db):
+    """list_participants must return registration order (the sheet layout).
+
+    Regression (2026-10-04): it used to sort by discord_id, so the sheet
+    row mapping re-sorted participants on every registration and mislabeled
+    pre-created rows. Ties (same registration second) break by discord_id,
+    keeping the order deterministic.
+    """
+    def register_at(discord_id, name, at):
+        db.add_participant(discord_id, name)
+        db.execute(
+            "UPDATE participants SET registered_at_utc = ? WHERE discord_id = ?",
+            (at, discord_id),
+        )
+
+    register_at(300, "first", "2026-10-04T19:57:00+00:00")
+    register_at(100, "second", "2026-10-04T19:57:30+00:00")
+    register_at(200, "third", "2026-10-04T19:58:00+00:00")
+    names = [r["display_name"] for r in db.list_participants()]
+    assert names == ["first", "second", "third"]  # not discord-id order
+    # Later registrations never shift earlier participants.
+    register_at(50, "fourth", "2026-10-04T19:59:00+00:00")
+    assert [r["display_name"] for r in db.list_participants()][:3] == names
 
 
 def test_dispatched_event_markers(db):

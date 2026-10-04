@@ -59,6 +59,13 @@ COL_RUN_TIME = 9
 COL_VIDEO = 10
 NUM_COLUMNS = 10
 
+# Columns that identify a row (as opposed to dynamic result data). They are
+# always rewritten from the row mapping by ``ensure_season_rows`` so that a
+# re-run repairs mislabeled rows; only the dynamic columns are merge-only.
+IDENTITY_COLUMNS = frozenset(
+    {COL_PERIOD, COL_PERIOD_START, COL_PERIOD_END, COL_PARTICIPANT, COL_DISCORD_ID}
+)
+
 HEADER = [
     "Round",
     "Round Start (UTC)",
@@ -180,10 +187,11 @@ class SheetService:
     def _season_row_map(self, season: SeasonSpec) -> dict[tuple[int, int], int]:
         """Build ``{(period_index, discord_id): sheet_row}`` for a season.
 
-        Rows are grouped by participant (registration order), one row per
-        period inside each group. Row 1 is the header. The mapping is
-        derived from the same deterministic ordering as
-        ``Database.participant_sheet_row`` and is stable across restarts.
+        Rows are grouped by participant (registration order, from
+        ``Database.list_participants``), one row per period inside each
+        group. Row 1 is the header. Later registrants are always appended
+        after existing rows, so the mapping is stable across restarts and
+        mid-season registrations.
         """
         mapping: dict[tuple[int, int], int] = {}
         row = 2
@@ -194,11 +202,13 @@ class SheetService:
         return mapping
 
     def ensure_season_rows(self, season: SeasonSpec) -> None:
-        """Ensure the (participant x period) rows exist, without clobbering data.
+        """Ensure the (participant x period) rows exist and are correctly labeled.
 
-        Rows are merged: only empty cells get their default values, so a
-        re-run (or a stale read from Google) never overwrites already-written
-        dynamic cells such as the seed or a submission.
+        The identity columns (round, start, end, participant name, discord
+        id) are always rewritten from the row mapping, so a re-run repairs
+        rows whose labels were written under a stale mapping. Dynamic cells
+        (seed, timestamps, run time, video) are merged: only empty cells are
+        filled, so already-written results are never clobbered.
         """
         ws = self.get_or_create_season_tab(season.season_id)
         if ws is None:  # dry run
@@ -216,7 +226,9 @@ class SheetService:
         updates = []
         for (period_index, discord_id), row in mapping.items():
             idx = row - 1
-            existing = all_values[idx][:NUM_COLUMNS] if idx < len(all_values) else []
+            raw = all_values[idx] if idx < len(all_values) else []
+            existing = [str(c) for c in raw[:NUM_COLUMNS]]
+            existing += [""] * (NUM_COLUMNS - len(existing))
             start = season.period_start(period_index)
             end = season.period_end(period_index)
             participant = self._db.get_participant(discord_id)
@@ -233,25 +245,22 @@ class SheetService:
                 "",  # run time
                 "",  # video
             ]
-            if all(str(c).strip() == "" for c in existing):
-                values = defaults  # brand-new row
-            else:
-                # Merge: keep existing values, fill only empty cells.
-                values = list(existing)
-                changed = False
-                for i in range(NUM_COLUMNS):
-                    if str(values[i]).strip() == "" and str(defaults[i]).strip() != "":
-                        values[i] = defaults[i]
-                        changed = True
-                if not changed:
-                    continue  # row is complete
+            values = list(existing)
+            for i in range(NUM_COLUMNS):
+                if (i + 1) in IDENTITY_COLUMNS:
+                    values[i] = defaults[i]  # identity is authoritative
+                elif str(values[i]).strip() == "" and str(defaults[i]).strip() != "":
+                    values[i] = defaults[i]  # fill an empty dynamic cell
+            if [str(v) for v in values] == existing:
+                continue  # row already correct and complete
             updates.append({
                 "range": f"A{row}:{_col_letter(NUM_COLUMNS)}{row}",
                 "values": [values],
             })
         if updates:
             ws.batch_update(updates)
-            log.info("Pre-created %d rows for season %s", len(updates), season.season_id)
+            log.info("Ensured %d rows for season %s (created or repaired)",
+                     len(updates), season.season_id)
 
     def _target_row(self, season: SeasonSpec, period_index: int, discord_id: int) -> int:
         mapping = self._season_row_map(season)

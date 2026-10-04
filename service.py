@@ -273,6 +273,22 @@ class LeagueService:
             "Register with `/league register`!",
         )
 
+    def ensure_season_sheet(self) -> None:
+        """Re-run the sheet row pre-creation for the current season (self-heal).
+
+        Idempotent: identity columns are rewritten from the row mapping
+        (repairing mislabeled rows), dynamic cells are only filled when
+        empty. Called at boot so a sheet left inconsistent by a failed or
+        buggy write is repaired without waiting for the next registration.
+        """
+        state = current_season_state(self.db)
+        if state is None:
+            return
+        try:
+            self.sheets.ensure_season_rows(state.season)
+        except SheetsError as exc:
+            log.warning("Season sheet self-heal failed: %s", exc)
+
     def season_info(self) -> str:
         state = current_season_state(self.db)
         if state is None:
