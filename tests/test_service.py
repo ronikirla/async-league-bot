@@ -13,10 +13,13 @@ from sheets import SheetService, DRY_RUN_LOG_FILE
 
 
 class FakeMember:
-    def __init__(self, user_id: int, name: str = "runner"):
+    def __init__(self, user_id: int, name: str = "runner", nick: str | None = None):
         self.id = user_id
         self.global_name = name
         self.name = name
+        # Mirrors discord.py: Member.display_name is the server nickname
+        # when one is set, else the global username.
+        self.display_name = nick or name
         self.mention = f"<@{user_id}>"
 
 class FakeRole:
@@ -69,6 +72,16 @@ def service(tmp_path, monkeypatch):
     svc = LeagueService(config, db, roles, sheets)
     yield svc, db
     db.close()
+
+
+def test_register_stores_server_nickname(service):
+    """Registration records the server nickname (not the global username)."""
+    svc, db = service
+    svc.register(FakeMember(2, "GlobalName", nick="ServerNick"))
+    assert db.get_participant(2)["display_name"] == "ServerNick"
+    # No nickname set: falls back to the global username.
+    svc.register(FakeMember(3, "GlobalName"))
+    assert db.get_participant(3)["display_name"] == "GlobalName"
 
 
 def test_full_period_flow(service, tmp_path):

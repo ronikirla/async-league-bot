@@ -173,3 +173,66 @@ def test_ensure_season_rows_repairs_mislabeled_rows(env):
     assert ws.rows[1][COL_DISCORD_ID - 1] == "300"
     assert ws.rows[1][COL_SEED - 1] == "42"
     assert ws.rows[1][COL_PERIOD_START - 1] == iso_utc(spec.period_start(1))
+
+
+def test_ensure_season_rows_prefers_server_nickname(env):
+    """When a name resolver is wired in, the sheet shows the server
+    nickname instead of the name stored at registration."""
+    db, sheets, ws = env
+    spec = _make_season(db, num_periods=2)
+    _register(db, 300, "Shady", "2026-10-04T19:57:00+00:00")
+    sheets.name_resolver = lambda discord_id: {300: "ShadyNick"}.get(discord_id)
+
+    sheets.ensure_season_rows(spec)
+
+    names = [r[COL_PARTICIPANT - 1] for r in ws.rows[1:]]
+    assert names == ["ShadyNick", "ShadyNick"]
+
+
+def test_ensure_season_rows_falls_back_when_nickname_unknown(env):
+    """A member the resolver cannot resolve (left the server, not cached)
+    keeps the name stored at registration."""
+    db, sheets, ws = env
+    spec = _make_season(db, num_periods=2)
+    _register(db, 300, "Shady", "2026-10-04T19:57:00+00:00")
+    _register(db, 100, "halqery", "2026-10-04T19:57:30+00:00")
+    # Only Shady is still on the server.
+    sheets.name_resolver = lambda discord_id: "ShadyNick" if discord_id == 300 else None
+
+    sheets.ensure_season_rows(spec)
+
+    names = [r[COL_PARTICIPANT - 1] for r in ws.rows[1:]]
+    assert names == ["ShadyNick", "ShadyNick", "halqery", "halqery"]
+
+
+def test_ensure_season_rows_picks_up_nickname_change(env):
+    """Identity columns are authoritative, so a nickname change is
+    refreshed on the next ensure_season_rows run."""
+    db, sheets, ws = env
+    spec = _make_season(db, num_periods=1)
+    _register(db, 300, "Shady", "2026-10-04T19:57:00+00:00")
+    sheets.name_resolver = lambda discord_id: "OldNick"
+    sheets.ensure_season_rows(spec)
+
+    sheets.name_resolver = lambda discord_id: "NewNick"
+    sheets.ensure_season_rows(spec)
+
+    names = [r[COL_PARTICIPANT - 1] for r in ws.rows[1:]]
+    assert names == ["NewNick"]
+
+
+def test_ensure_season_rows_survives_resolver_error(env):
+    """A failing resolver must not break the sheet write; the stored name
+    is used instead."""
+    db, sheets, ws = env
+    spec = _make_season(db, num_periods=1)
+    _register(db, 300, "Shady", "2026-10-04T19:57:00+00:00")
+
+    def boom(discord_id: int) -> str:
+        raise RuntimeError("member cache unavailable")
+
+    sheets.name_resolver = boom
+    sheets.ensure_season_rows(spec)
+
+    names = [r[COL_PARTICIPANT - 1] for r in ws.rows[1:]]
+    assert names == ["Shady"]

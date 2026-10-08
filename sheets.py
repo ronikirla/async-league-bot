@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from config import Config
@@ -92,9 +93,19 @@ def _col_letter(idx: int) -> str:
 
 
 class SheetService:
-    def __init__(self, config: Config, db: Database):
+    def __init__(
+        self,
+        config: Config,
+        db: Database,
+        name_resolver: Callable[[int], str | None] | None = None,
+    ):
         self._config = config
         self._db = db
+        # Optional hook: maps a discord id to the participant's current
+        # server nickname (or None if unknown). The bot wires this in so the
+        # sheet shows live nicknames; without it the name stored at
+        # registration time is used.
+        self.name_resolver = name_resolver
         self._gs_client = None
         self._spreadsheet = None
 
@@ -184,6 +195,25 @@ class SheetService:
         return ws
 
     # -- row layout -----------------------------------------------------
+    def _participant_name(self, discord_id: int) -> str:
+        """Display name for a participant's sheet rows.
+
+        Prefers the live server nickname (via the resolver wired in by the
+        bot), falling back to the name stored at registration when the
+        member is unknown (left the server, not cached yet) or the resolver
+        fails. A resolver error must never break a sheet write.
+        """
+        if self.name_resolver is not None:
+            try:
+                nick = self.name_resolver(discord_id)
+            except Exception:
+                log.exception("Name resolver failed for discord id %d", discord_id)
+            else:
+                if nick:
+                    return nick
+        participant = self._db.get_participant(discord_id)
+        return participant["display_name"] if participant else "?"
+
     def _season_row_map(self, season: SeasonSpec) -> dict[tuple[int, int], int]:
         """Build ``{(period_index, discord_id): sheet_row}`` for a season.
 
@@ -206,7 +236,9 @@ class SheetService:
 
         The identity columns (round, start, end, participant name, discord
         id) are always rewritten from the row mapping, so a re-run repairs
-        rows whose labels were written under a stale mapping. Dynamic cells
+        rows whose labels were written under a stale mapping. The participant
+        name is the current server nickname when a name resolver is wired in,
+        so nickname changes are picked up on the next run. Dynamic cells
         (seed, timestamps, run time, video) are merged: only empty cells are
         filled, so already-written results are never clobbered.
         """
@@ -231,8 +263,7 @@ class SheetService:
             existing += [""] * (NUM_COLUMNS - len(existing))
             start = season.period_start(period_index)
             end = season.period_end(period_index)
-            participant = self._db.get_participant(discord_id)
-            name = participant["display_name"] if participant else "?"
+            name = self._participant_name(discord_id)
             defaults = [
                 period_index,
                 iso_utc(start),

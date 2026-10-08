@@ -285,17 +285,16 @@ class League(commands.Cog):
     @league_admin.command(name="add_participant", description="Register a user as a league participant")
     @app_commands.describe(user="The user to register")
     @admin_only()
-    async def add_participant(self, interaction: app_commands.Interaction, user: discord.User):
+    # Member (not User) so the registration stores the server nickname.
+    async def add_participant(self, interaction: app_commands.Interaction, user: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
             message = await asyncio.to_thread(self.service.add_participant, user)
         except LeagueError as exc:
             message = f"❌ {exc}"
         else:
-            member = interaction.guild.get_member(user.id)
-            if member:
-                await self.bot.roles.grant_participant(interaction.guild, member)
-                await self.sync_seed_not_done(interaction.guild, user)
+            await self.bot.roles.grant_participant(interaction.guild, user)
+            await self.sync_seed_not_done(interaction.guild, user)
         await interaction.followup.send(message)
 
     @league_admin.command(name="remove_participant", description="Remove a user from the league")

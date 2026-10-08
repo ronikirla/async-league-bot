@@ -38,6 +38,22 @@ class LeagueBot(commands.Bot):
         self.sheets = sheets
         self.service = service
         self._sheet_healed = False
+        # Sheets show each participant's current server nickname, falling
+        # back to the name stored at registration. Resolved at sheet-write
+        # time so nickname changes are picked up on the next sheet update.
+        sheets.name_resolver = self._sheet_display_name
+
+    def _sheet_display_name(self, discord_id: int) -> str | None:
+        """Current server nickname for a member, or None if unknown.
+
+        Only reads the member cache (no awaits, no network), so it is safe
+        to call from the worker threads the blocking sheet writes run in.
+        """
+        guild = self.get_guild(self.config.guild_id)
+        if guild is None:
+            return None
+        member = guild.get_member(discord_id)
+        return member.display_name if member else None
 
     async def on_message(self, message: discord.Message) -> None:
         # This bot is slash-command-only; the message-command pipeline is

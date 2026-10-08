@@ -317,7 +317,9 @@ class LeagueService:
         return "\n".join(lines)
 
     def add_participant(self, user: discord.User) -> str:
-        name = getattr(user, "global_name", None) or user.name
+        # display_name is the server nickname when the caller passes a guild
+        # Member, else the global username (User.display_name).
+        name = user.display_name
         created = self.db.add_participant(int(user.id), name)
         if not created:
             return f"<@{user.id}> is already registered."
@@ -360,7 +362,10 @@ class LeagueService:
         or late, while it runs (a late entry plays the remaining rounds)."""
         if self.db.is_participant(member.id):
             return f"Welcome back, {member.mention}! You are already registered."
-        name = member.global_name or member.name
+        # Store the server nickname (falls back to the global username when
+        # no nickname is set); the sheet self-heal refreshes it later if it
+        # changes mid-season.
+        name = member.display_name
         self.db.add_participant(member.id, name)
         state = current_season_state(self.db)
         if state is not None:
