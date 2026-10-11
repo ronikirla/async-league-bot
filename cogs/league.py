@@ -132,7 +132,7 @@ class League(commands.Cog):
             return
         await interaction.followup.send(
             f"🎲 **Seed for the current round:** `{result.seed}`\n"
-            "Keep it to yourself until you have submitted your time.",
+            "Do not share it with others.",
             ephemeral=True,
         )
         # Ensure the seed-not-done role is present (they have not submitted yet).
